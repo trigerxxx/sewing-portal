@@ -812,8 +812,10 @@ function openTech(numStr) {
 function techFlowHtml(numStr) {
   const mats = (ST.tech.сырьё || {})[numStr] || [];
   const hist = (ST.tech.история || {})[numStr] || [];
-  if (!mats.length && !hist.length) return '';
-  return `${mats.length ? `<h4 style="margin:16px 0 8px">Сырьё от снабженца</h4><div class="cx-scroll"><table class="cx-table">
+  const spec = ((ST.tech.расход || {})[numStr] || []);
+  if (!mats.length && !hist.length && !spec.length) return '';
+  return `${spec.length ? `<h4 style="margin:16px 0 8px">Расход сырья на 1 шт и на заказ</h4>${spec.map(flSpecTableHtml).join('')}` : ''}
+    ${mats.length ? `<h4 style="margin:16px 0 8px">Сырьё от снабженца</h4><div class="cx-scroll"><table class="cx-table">
       <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно</th><th class="num">Есть</th><th>Статус</th><th>Комментарий</th></tr></thead>
       <tbody>${mats.map((m) => `<tr><td>${esc(m.материал)}</td><td>${esc(m.цвет)}</td><td class="num">${nf(m.нужно)} ${esc(m.ед)}</td>
         <td class="num">${nf(m.есть)}</td><td>${esc(m.статус || '—')}</td><td>${esc(m.комментарий)}</td></tr>`).join('')}</tbody></table></div>` : ''}
@@ -957,6 +959,10 @@ function cutPartyHtml() {
               </table>
             </div>
           </div>
+        </div>
+        <div class="cx-card" style="margin-top:14px">
+          <div class="cx-card-h"><h3>Расход сырья</h3><span class="cx-hint">по спецификации снабженца</span></div>
+          <div class="cx-card-b">${flCutSpecHtml(p)}</div>
         </div>
       </div>
       <div class="cx-side">

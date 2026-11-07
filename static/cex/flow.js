@@ -2,8 +2,70 @@
 
 /* Модуль «Цех» · поток заказа: конструктор (производственная карта) → снабженец (сырьё) → технолог. */
 
-const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, рулоны: [], статусы: [] },
+const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, расход: {}, рулоны: [], статусы: [] },
   num: '', rows: [], bomModel: '', bomRows: [], supplyTab: 'orders' };
+
+/* ---- расход сырья: общие функции для снабжения, технолога и закройщика ---- */
+const FL_G = { 'г': 1, 'гр': 1, 'грамм': 1, 'кг': 1000 };
+const FL_NEW_ROW = () => ({ материал: '', цвет: '', норма: '', ед: 'м', параметры: '', запас: '' });
+
+function flGrams(v, unit) {
+  const k = FL_G[String(unit || '').toLowerCase().replace(/\.$/, '')];
+  return k ? Math.round(Number(v || 0) * k * 10) / 10 : null;
+}
+
+// «336 г», «33,6 кг = 33 600 г», «0,4 м» — вес показываем и в граммах, и в килограммах
+function flQty(v, unit) {
+  const g = flGrams(v, unit);
+  const main = `${nf(v)} ${esc(unit)}`;
+  if (g === null) return main;
+  const isKg = String(unit).toLowerCase().startsWith('кг');
+  const other = isKg ? `${nf(g)} г` : (g >= 1000 ? `${nf(g / 1000)} кг` : '');
+  return other ? `${main} <span class="cx-hint">= ${other}</span>` : main;
+}
+
+// строка «На 1 шт модели 477: Футер — 336 г; …» (rows — расход на 1 шт из consumption)
+function flPerPieceHtml(model, rows) {
+  if (!rows || !rows.length) {
+    return `<div class="cx-notice warn">Для модели <b>${esc(model)}</b> нет спецификации — расход сырья не рассчитан. Её вносит снабженец (вкладка «Снабжение» → «Спецификации»).</div>`;
+  }
+  const parts = rows.map((r) => `${esc(r.материал)}${r.цвет ? ` (${esc(r.цвет)})` : ''} — <b>${flQty(r.на_1_шт, r.ед)}</b>`);
+  return `<div class="cx-notice">На 1 шт модели <b>${esc(model)}</b>: ${parts.join('; ')}${rows.some((r) => r.запас) ? ' <span class="cx-hint">(с запасом на отходы)</span>' : ''}</div>`;
+}
+
+// таблица по модели заказа: норма, запас, на 1 шт и на всё количество (m — элемент «расход» заказа)
+function flSpecTableHtml(m) {
+  if (m.нет_спецификации) return flPerPieceHtml(m.модель, []);
+  return `${flPerPieceHtml(m.модель, m.строки)}
+    <div class="cx-scroll"><table class="cx-table">
+      <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Норма</th><th class="num">Запас</th><th class="num">На 1 шт</th><th class="num">На ${nf(m.штук)} шт</th></tr></thead>
+      <tbody>${m.строки.map((r) => `<tr><td>${esc(r.материал)}</td>
+        <td>${r.цвет ? esc(r.цвет) : '<span class="cx-hint">в цвет изделия</span>'}</td>
+        <td class="num">${nf(r.норма)} ${esc(r.ед)}</td><td class="num">${r.запас ? nf(r.запас) + ' %' : '—'}</td>
+        <td class="num"><b>${flQty(r.на_1_шт, r.ед)}</b></td><td class="num">${flQty(r.всего, r.ед)}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+// для закройщика: расход на 1 шт, на партию по плану и на то, что ещё не раскроено (p — партия из cut_state)
+function flCutSpecHtml(p) {
+  const r = p.расход;
+  if (!r) return '';
+  if (r.нет_спецификации) return flPerPieceHtml(p.модель, []);
+  const key = (x) => `${x.материал}|${x.цвет}|${x.ед}`;
+  const rest = Object.fromEntries((r.остаток || []).map((x) => [key(x), x]));
+  return `${flPerPieceHtml(p.модель, r.на_1_шт)}
+    <div class="cx-scroll"><table class="cx-table">
+      <thead><tr><th>Материал</th><th>Цвет</th><th class="num">На партию (${nf(p.план)} шт)</th><th class="num">Ещё не раскроено (${nf(p.остаток)} шт)</th></tr></thead>
+      <tbody>${(r.план || []).map((x) => `<tr><td>${esc(x.материал)}</td><td>${esc(x.цвет)}</td>
+        <td class="num">${flQty(x.нужно, x.ед)}</td><td class="num">${rest[key(x)] ? flQty(rest[key(x)].нужно, x.ед) : '—'}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+function flRollsHint(m) {
+  if (!m.рулоны) return '<span class="cx-hint">—</span>';
+  const r = m.рулоны;
+  return `${nf(r.рулонов)} рул. · ${nf(r.кг)} кг${r.под_заказ_кг ? `<div class="cx-hint">под этот заказ ${nf(r.под_заказ_кг)} кг</div>` : ''}`;
+}
 
 async function loadDesign() { FL.design = await api(`${API}/design`); }
 async function loadSupply() { FL.supply = await api(`${API}/supply`); }
@@ -119,7 +181,8 @@ function supplyCardHtml(o) {
     <td class="num">${nf(c.заказано)}</td><td class="num"><b>${nf(c.итог)}</b></td><td>${esc(c.характеристики)}</td></tr>`).join('');
   const sts = FL.supply.статусы || [];
   const mats = (o.сырьё || []).map((m, i) => `<tr>
-      <td>${esc(m.материал)}</td><td>${esc(m.цвет)}</td><td class="num">${nf(m.нужно)} ${esc(m.ед)}</td>
+      <td>${esc(m.материал)}</td><td>${esc(m.цвет)}</td><td class="num"><b>${flQty(m.нужно, m.ед)}</b></td>
+      <td class="num">${flRollsHint(m)}</td>
       <td><input class="input cx-mini" type="number" min="0" step="any" data-fl-mat="${i}|есть" value="${esc(m.есть || '')}"></td>
       <td><select class="input" data-fl-mat="${i}|статус"><option value="">—</option>${sts.map((s) => `<option ${m.статус === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></td>
       <td><input class="input" data-fl-mat="${i}|комментарий" value="${esc(m.комментарий)}"></td>
@@ -131,11 +194,15 @@ function supplyCardHtml(o) {
       <div class="cx-scroll"><table class="cx-table">
         <thead><tr><th>Модель</th><th>Цвет</th><th>Размер</th><th class="num">Заказано</th><th class="num">Итог</th><th>Характеристики</th></tr></thead>
         <tbody>${card}</tbody></table></div>
-      <h4 style="margin:18px 0 8px">Сырьё по спецификации</h4>
+      <h4 style="margin:18px 0 8px">Расход сырья: на 1 шт и на весь заказ</h4>
+      <div class="cx-hint" style="margin-bottom:8px">Считается по спецификации модели: норма × (1 + запас на отходы). Эти же цифры видят технолог и закройщик.</div>
+      ${(o.расход || []).map(flSpecTableHtml).join('')}
+      <h4 style="margin:18px 0 8px">Сырьё на заказ — по цветам</h4>
       ${miss.length ? `<div class="cx-notice warn">Нет спецификации для: <b>${miss.map(esc).join(', ')}</b> — заполните во вкладке «Спецификации».</div>` : ''}
       ${mats ? `<div class="cx-scroll"><table class="cx-table">
-        <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно</th><th>Есть / заказано</th><th>Статус</th><th>Комментарий</th></tr></thead>
-        <tbody>${mats}</tbody></table></div>` : ''}
+        <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно</th><th class="num">Принято рулонов</th><th>Есть / заказано</th><th>Статус</th><th>Комментарий</th></tr></thead>
+        <tbody>${mats}</tbody></table></div>
+        <div class="cx-hint" style="margin-top:6px">«Принято рулонов» — приход по реестру (вкладка «Рулоны»), расход на крой из него не вычитается.</div>` : ''}
       <div class="cx-btn-row" style="margin-top:14px">
         <button class="btn" data-act="fl-supply-save">Сохранить</button>
         <button class="btn primary" data-act="fl-supply-done">Сырьё готово — передать технологу</button>
@@ -173,7 +240,8 @@ function bomHtml() {
       <td><input class="input" data-fl-bom="${i}|материал" value="${esc(r.материал)}" placeholder="ткань, нитки, молния…"></td>
       <td><input class="input" data-fl-bom="${i}|цвет" value="${esc(r.цвет)}" placeholder="пусто = в цвет изделия" list="fl-colors"></td>
       <td><input class="input cx-mini" type="number" min="0" step="any" data-fl-bom="${i}|норма" value="${esc(r.норма)}"></td>
-      <td><input class="input cx-mini" data-fl-bom="${i}|ед" value="${esc(r.ед || 'м')}"></td>
+      <td><input class="input cx-mini" data-fl-bom="${i}|ед" value="${esc(r.ед || 'м')}" list="fl-units"></td>
+      <td><input class="input cx-mini" type="number" min="0" max="100" step="any" data-fl-bom="${i}|запас" value="${esc(r.запас || '')}" placeholder="0"></td>
       <td><input class="input" data-fl-bom="${i}|параметры" value="${esc(r.параметры)}" placeholder="ширина, состав…"></td>
       <td><button class="btn ghost" data-act="fl-bom-del" data-i="${i}">✕</button></td></tr>`).join('');
   return `<div class="cx-card"><div class="cx-card-h"><h3>Спецификация материалов (BOM) по артикулу</h3></div>
@@ -182,13 +250,24 @@ function bomHtml() {
       ${FL.bomModel ? `
         <datalist id="fl-colors">${(ST.refs.цвета || []).map((c) => `<option value="${esc(c.цвет)}">`).join('')}</datalist>
         <div class="cx-scroll" style="margin-top:12px"><table class="cx-table">
-          <thead><tr><th>Сырьё / материал</th><th>Цвет</th><th>Норма на 1 шт</th><th>Ед.</th><th>Доп. параметры</th><th></th></tr></thead>
+          <thead><tr><th>Сырьё / материал</th><th>Цвет</th><th>Норма на 1 шт</th><th>Ед.</th><th title="Запас на отходы и подрезку, %">Запас, %</th><th>Доп. параметры</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
+        <datalist id="fl-units"><option value="г"><option value="кг"><option value="м"><option value="шт"><option value="бобина"></datalist>
+        <div class="cx-hint" style="margin-top:8px">Норму можно вносить в граммах («г») или килограммах («кг») — закройщик и технолог увидят вес. Запас — на отходы, его добавляют к норме.</div>
+        <div id="fl-bom-preview" style="margin-top:12px">${flBomPreviewHtml()}</div>
         <div class="cx-btn-row" style="margin-top:10px">
           <button class="btn" data-act="fl-bom-add">+ Материал</button>
           <button class="btn primary" data-act="fl-bom-save">Сохранить спецификацию ${esc(FL.bomModel)}</button>
         </div>` : '<div class="cx-hint" style="margin-top:10px">Выберите артикул</div>'}
     </div></div>`;
+}
+
+// «Расход на 1 шт» прямо при вводе спецификации — как её увидят технолог и закройщик
+function flBomPreviewHtml() {
+  const rows = FL.bomRows.filter((r) => String(r.материал || '').trim() && num(r.норма) > 0).map((r) => ({
+    материал: r.материал, цвет: r.цвет, ед: r.ед || 'м', запас: num(r.запас),
+    на_1_шт: Math.round(num(r.норма) * (1 + num(r.запас) / 100) * 10000) / 10000 }));
+  return rows.length ? flPerPieceHtml(FL.bomModel, rows) : '';
 }
 
 function rollsHtml() {
@@ -249,10 +328,10 @@ document.addEventListener('click', async (ev) => {
   if (act === 'fl-bom-pick') {
     FL.bomModel = el.dataset.model;
     FL.bomRows = ((FL.supply.спецификации || {})[FL.bomModel] || []).map((r) => ({ ...r }));
-    if (!FL.bomRows.length) FL.bomRows.push({ материал: '', цвет: '', норма: '', ед: 'м', параметры: '' });
+    if (!FL.bomRows.length) FL.bomRows.push(FL_NEW_ROW());
     return render();
   }
-  if (act === 'fl-bom-add') { FL.bomRows.push({ материал: '', цвет: '', норма: '', ед: 'м', параметры: '' }); return render(); }
+  if (act === 'fl-bom-add') { FL.bomRows.push(FL_NEW_ROW()); return render(); }
   if (act === 'fl-bom-del') { FL.bomRows.splice(Number(el.dataset.i), 1); return render(); }
   if (act === 'fl-bom-save') {
     await flPost('/supply/bom', { модель: FL.bomModel, строки: FL.bomRows }, `Спецификация ${FL.bomModel} сохранена`);
@@ -277,5 +356,9 @@ document.addEventListener('input', (ev) => {
     if (total) total.textContent = nf(FL.rows.reduce((s, r) => s + num(r.итог), 0));
   }
   if (t.dataset.flMat) pick('flMat', FL.rows);
-  if (t.dataset.flBom) pick('flBom', FL.bomRows);
+  if (t.dataset.flBom) {
+    pick('flBom', FL.bomRows);
+    const box = document.getElementById('fl-bom-preview');
+    if (box) box.innerHTML = flBomPreviewHtml();
+  }
 });

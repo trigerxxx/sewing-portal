@@ -98,8 +98,8 @@ PCARD_LOG = ("История карты",
              ["№ заказа", "дата", "кто", "модель", "цвет", "размер", "было", "стало", "комментарий"],
              [10, 16, 14, 12, 16, 9, 8, 8, 34])
 BOM = ("Спецификация",
-       ["модель", "материал", "цвет", "норма на 1 шт", "ед.", "параметры"],
-       [12, 26, 18, 13, 8, 30])
+       ["модель", "материал", "цвет", "норма на 1 шт", "ед.", "параметры", "запас %"],
+       [12, 26, 18, 13, 8, 30, 10])
 SUPPLY_SH = ("Снабжение",
              ["№ заказа", "материал", "цвет", "ед.", "нужно", "есть", "статус", "комментарий",
               "кто", "когда"],
@@ -591,7 +591,47 @@ def boms() -> dict[str, list[dict]]:
             out.setdefault(_s(r.get("модель")), []).append({
                 "материал": _s(r.get("материал")), "цвет": _s(r.get("цвет")),
                 "норма": _num(r.get("норма на 1 шт")), "ед": _s(r.get("ед.")),
-                "параметры": _s(r.get("параметры"))})
+                "параметры": _s(r.get("параметры")), "запас": _num(r.get("запас %"))})
+    return out
+
+
+# Единицы, которые можно показать в граммах: норму «320 г» и «0,32 кг» закройщик видит одинаково.
+_GRAM_UNITS = {"г": 1.0, "гр": 1.0, "грамм": 1.0, "кг": 1000.0}
+
+
+def _grams(amount: float, unit: str):
+    """Количество в граммах, если единица — вес (г, кг); иначе None."""
+    k = _GRAM_UNITS.get(_s(unit).lower().rstrip("."))
+    return round(amount * k, 1) if k else None
+
+
+def _per_piece(line: dict) -> float:
+    """Расход на 1 шт с запасом на отходы: норма × (1 + запас/100)."""
+    return line["норма"] * (1 + line.get("запас", 0) / 100)
+
+
+def consumption(model: str, bom: dict | None = None) -> list[dict]:
+    """Сколько сырья уходит на ОДНУ штуку модели — это читают снабженец, технолог и закройщик."""
+    lines = (boms() if bom is None else bom).get(_s(model)) or []
+    return [{"материал": b["материал"], "цвет": b["цвет"], "ед": b["ед"], "норма": b["норма"],
+             "запас": b.get("запас", 0), "на_1_шт": round(_per_piece(b), 4),
+             "граммы": _grams(_per_piece(b), b["ед"]), "параметры": b["параметры"]}
+            for b in lines]
+
+
+def model_specs(card: list[dict], bom: dict) -> list[dict]:
+    """По каждой модели карты: сколько штук, расход на 1 шт и на всё количество."""
+    qty: dict[str, int] = {}
+    for c in card:
+        qty[c["модель"]] = qty.get(c["модель"], 0) + c["итог"]
+    out = []
+    for model, pieces in qty.items():
+        rows = consumption(model, bom)
+        for r in rows:
+            total = r["на_1_шт"] * pieces
+            r["всего"] = round(total, 3)
+            r["всего_г"] = _grams(total, r["ед"])
+        out.append({"модель": model, "штук": pieces, "строки": rows, "нет_спецификации": not rows})
     return out
 
 
@@ -608,16 +648,20 @@ def save_bom(me: dict, body: dict) -> dict:
         norm = _num(it.get("норма"))
         if norm <= 0:
             raise ValueError(f"Строка {i} ({mat}): норма расхода должна быть больше нуля")
+        waste = _num(it.get("запас"))
+        if waste < 0 or waste > 100:
+            raise ValueError(f"Строка {i} ({mat}): запас на отходы — от 0 до 100 %")
         lines.append({"модель": model, "материал": mat, "цвет": _s(it.get("цвет")),
                       "норма на 1 шт": norm, "ед.": _s(it.get("ед")) or "м",
-                      "параметры": _s(it.get("параметры"))})
+                      "параметры": _s(it.get("параметры")), "запас %": waste or ""})
     rows = [r for r in _rows(BOM) if _s(r.get("модель")) != model] + lines
     store.write_sheet(BOM[0], BOM[1], rows)
     return {"модель": model, "строк": len(lines)}
 
 
 def supply_need(card: list[dict], bom: dict) -> tuple[list[dict], list[str]]:
-    """Сколько сырья нужно на карту: норма × итог. Пустой цвет в спецификации = в цвет изделия."""
+    """Сколько сырья нужно на карту: норма × (1 + запас) × итог.
+    Пустой цвет в спецификации = в цвет изделия."""
     need: dict[tuple, float] = {}
     missing: list[str] = []
     for c in card:
@@ -628,9 +672,25 @@ def supply_need(card: list[dict], bom: dict) -> tuple[list[dict], list[str]]:
             continue
         for b in lines:
             k = (b["материал"], b["цвет"] or c["цвет"], b["ед"])
-            need[k] = need.get(k, 0) + b["норма"] * c["итог"]
-    return ([{"материал": k[0], "цвет": k[1], "ед": k[2], "нужно": round(v, 3)}
+            need[k] = need.get(k, 0) + _per_piece(b) * c["итог"]
+    return ([{"материал": k[0], "цвет": k[1], "ед": k[2], "нужно": round(v, 3),
+              "граммы": _grams(v, k[2])}
              for k, v in need.items()], missing)
+
+
+def roll_stock(order_num: str = "") -> dict[tuple, dict]:
+    """Что уже принято рулонами (реестр снабженца) по материалу и цвету, кг.
+    Это ПРИХОД, а не остаток: расход рулонов на крой в реестре не вычитается."""
+    out: dict[tuple, dict] = {}
+    for r in roll_registry().values():
+        k = (r["материал"].lower(), r["цвет"].lower())
+        row = out.setdefault(k, {"рулонов": 0, "кг": 0.0, "под_заказ_кг": 0.0})
+        row["рулонов"] += 1
+        kg = _num(r["вес"])
+        row["кг"] = round(row["кг"] + kg, 3)
+        if order_num and r["заказ"] == order_num:
+            row["под_заказ_кг"] = round(row["под_заказ_кг"] + kg, 3)
+    return out
 
 
 def _supply_rows(num: str) -> list[dict]:
@@ -647,8 +707,13 @@ def supply_lines(order: dict, bom: dict, cards: dict) -> tuple[list[dict], list[
                  комментарий=_s(r.get("комментарий")))
     for (mat, color, unit), r in saved.items():  # добавленное снабженцем вручную
         need.append({"материал": mat, "цвет": color, "ед": unit, "нужно": _num(r.get("нужно")),
+                     "граммы": _grams(_num(r.get("нужно")), unit),
                      "есть": _num(r.get("есть")), "статус": _s(r.get("статус")),
                      "комментарий": _s(r.get("комментарий"))})
+    stock = roll_stock(order["номер"])
+    for n in need:  # подсказка по реестру рулонов — только для сырья, которое считают в весе
+        n["рулоны"] = stock.get((n["материал"].lower(), n["цвет"].lower())) \
+            if _grams(1, n["ед"]) else None
     return need, missing
 
 
@@ -671,8 +736,10 @@ def supply_state() -> dict:
         if o["статус"] == SUPPLYING:
             o["карта"] = card_of(o, cards)
             o["сырьё"], o["без_спецификации"] = supply_lines(o, bom, cards)
+            o["расход"] = model_specs(o["карта"], bom)
             queue_.append(o)
     return {"очередь": queue_, "спецификации": bom, "рулоны": list(roll_registry().values())[::-1][:300],
+            "расход": {m: consumption(m, bom) for m in bom},
             "статусы": list(SUPPLY_STATUSES)}
 
 
@@ -743,6 +810,20 @@ def rate_of(code: str, default: float = 0.0) -> float:
     return default
 
 
+def party_consumption(party: dict, bom: dict) -> dict:
+    """Сырьё для закройщика: на 1 шт, на всю партию по плану и на то, что ещё не раскроено."""
+    model = party["модель"]
+
+    def need(key: str) -> list[dict]:
+        card = [{"модель": model, "цвет": r["цвет"], "итог": r[key]}
+                for r in party["строки"] if r[key] > 0]
+        return supply_need(card, bom)[0]
+
+    per = consumption(model, bom)
+    return {"на_1_шт": per, "план": need("план"), "остаток": need("остаток"),
+            "нет_спецификации": not per}
+
+
 def cut_state() -> dict:
     groups: dict[str, dict] = {}
     for r in _rows(PARTIES):
@@ -806,9 +887,11 @@ def cut_state() -> dict:
     out.sort(key=lambda g: _int(g["номер"]))
     pending = {num: [x["название"] for x in order_steps(num, rows=rows) if not x["выполнено"]]
                for num, rows in _party_snapshots("заказ").items()}
+    bom = boms()
     for g in out:
         g["карты"] = cards_of(g["номер"])
         g["ждёт_шагов"] = pending.get(g["номер"], [])
+        g["расход"] = party_consumption(g, bom)
     return {"партии": out, "ставка": rate_of("РАСКР", 15.0), "лекала": patterns(),
             "рулоны_склад": list(roll_registry().values())}
 
@@ -3464,9 +3547,11 @@ def _dispatch(ctx) -> None:
                 {"материал": _s(r.get("материал")), "цвет": _s(r.get("цвет")), "ед": _s(r.get("ед.")),
                  "нужно": _num(r.get("нужно")), "есть": _num(r.get("есть")),
                  "статус": _s(r.get("статус")), "комментарий": _s(r.get("комментарий"))})
+        bom, cards = boms(), pcards()
         _ok(ctx, {
             "очередь": tq,
             "сырьё": {o["номер"]: sup.get(o["номер"], []) for o in tq},
+            "расход": {o["номер"]: model_specs(card_of(o, cards), bom) for o in tq},
             "история": card_history(o["номер"] for o in tq),
             "отклонённые": rejected,
             "статистика": staff_stats(),

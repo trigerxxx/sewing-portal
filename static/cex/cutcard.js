@@ -85,6 +85,8 @@ function ccFormHtml(p) {
       <div class="cx-card-h"><h3>Партия №${esc(p.номер)} · ${esc(p.категория)} ${esc(p.модель)}</h3>
         <span class="cx-hint">план ${nf(p.план)} · раскроено ${nf(p.раскроено)} · осталось ${nf(p.остаток)}</span></div>
       <div class="cx-card-b">
+        <div class="cc-step">Расход сырья</div>
+        ${flCutSpecHtml(p)}
         <div class="cc-step">1. Карта кроя</div>
         <div class="cx-formgrid">
           <div class="cx-field"><label>Лекало</label>
