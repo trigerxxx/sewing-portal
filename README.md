@@ -10,6 +10,15 @@ python3 server.py --port 8787
 ```
 Windows: `start.bat`, macOS: `start.command`. Тесты: `python3 -m pytest -q tests`.
 
+## Посмотреть без рабочей книги заказчика (демо)
+```
+python3 seed.py        # демо-пользователи (компания Ц-01, boss / 123456)
+python3 demo_cex.py    # маленькая демо-книга с выдуманными заказами, нормами и складом
+python3 server.py --port 8787
+```
+Открыть `/cex/`. Вернуться на рабочую книгу: `python3 demo_cex.py --back`.
+В GitHub Codespaces: вкладка «Порты» → значок глобуса у порта 8787.
+
 ## Что НЕ хранится в git (см. `.gitignore`)
 - `data/`, `backups/`, `master/` и все `*.xlsm` — рабочие данные заказчика и бэкапы;
 - `secrets/wb_tokens.json` — токены Wildberries;
