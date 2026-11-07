@@ -762,6 +762,13 @@ class Handler(BaseHTTPRequestHandler):
                    "application/json; charset=utf-8", code)
 
     def _err(self, message: str, code: int = 400):
+        # Копия без базы Wildberries (data/sql/portal.db) и без ключей кабинетов: вместо
+        # технического «no such table» говорим, что именно не подключено.
+        text = str(message)
+        if "no such table" in text or "unable to open database" in text:
+            message = ("Данные Wildberries не подключены: в этой копии нет базы заказов и ключей "
+                       "кабинета. Рабочая часть цеха находится в разделе «Цех».")
+            code = 503
         self._json({"ok": False, "error": message}, code)
 
     def _body(self) -> dict:
