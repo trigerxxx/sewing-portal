@@ -5,6 +5,7 @@
 склад, Wildberries (FBS), магазин. Веб + Android + iOS (PWA).
 
 ## Запуск
+Один раз: `pip install -r requirements.txt` (нужны lxml и openpyxl).
 ```
 python3 server.py --port 8787
 ```
