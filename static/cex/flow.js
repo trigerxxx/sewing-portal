@@ -2,12 +2,14 @@
 
 /* Модуль «Цех» · поток заказа: конструктор (производственная карта) → снабженец (сырьё) → технолог. */
 
-const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, расход: {}, рулоны: [], статусы: [] },
-  num: '', rows: [], bomModel: '', bomRows: [], supplyTab: 'orders' };
+const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, размеры: {}, рулоны: [], статусы: [] },
+  num: '', rows: [], bomModel: '', bomRows: [], bomSizes: [], supplyTab: 'orders' };
 
-/* ---- расход сырья: общие функции для снабжения, технолога и закройщика ---- */
+/* ---- расход сырья: общие функции для снабжения, технолога и закройщика ----
+   Нормы задаются по размерам: у каждого размера свой расход на 1 шт. Пустая ячейка размера
+   в спецификации = действует общая норма строки («все размеры»). */
 const FL_G = { 'г': 1, 'гр': 1, 'грамм': 1, 'кг': 1000 };
-const FL_NEW_ROW = () => ({ материал: '', цвет: '', норма: '', ед: 'м', параметры: '', запас: '' });
+const FL_NEW_ROW = () => ({ материал: '', цвет: '', норма: '', ед: 'м', параметры: '', запас: '', размеры: {} });
 
 function flGrams(v, unit) {
   const k = FL_G[String(unit || '').toLowerCase().replace(/\.$/, '')];
@@ -24,36 +26,58 @@ function flQty(v, unit) {
   return other ? `${main} <span class="cx-hint">= ${other}</span>` : main;
 }
 
-// строка «На 1 шт модели 477: Футер — 336 г; …» (rows — расход на 1 шт из consumption)
-function flPerPieceHtml(model, rows) {
-  if (!rows || !rows.length) {
-    return `<div class="cx-notice warn">Для модели <b>${esc(model)}</b> нет спецификации — расход сырья не рассчитан. Её вносит снабженец (вкладка «Снабжение» → «Спецификации»).</div>`;
-  }
-  const parts = rows.map((r) => `${esc(r.материал)}${r.цвет ? ` (${esc(r.цвет)})` : ''} — <b>${flQty(r.на_1_шт, r.ед)}</b>`);
-  return `<div class="cx-notice">На 1 шт модели <b>${esc(model)}</b>: ${parts.join('; ')}${rows.some((r) => r.запас) ? ' <span class="cx-hint">(с запасом на отходы)</span>' : ''}</div>`;
+function flNoSpecHtml(model) {
+  return `<div class="cx-notice warn">Для модели <b>${esc(model)}</b> нет спецификации — расход сырья не рассчитан. Её вносит снабженец (вкладка «Снабжение» → «Спецификации»).</div>`;
 }
 
-// таблица по модели заказа: норма, запас, на 1 шт и на всё количество (m — элемент «расход» заказа)
+function flNoNormHtml(model, sizes) {
+  return sizes && sizes.length
+    ? `<div class="cx-notice warn">Для модели <b>${esc(model)}</b> нет нормы расхода на размер: <b>${sizes.map(esc).join(', ')}</b> — сырьё на эти штуки не посчитано. Норму вносит снабженец (вкладка «Спецификации»).</div>` : '';
+}
+
+// Матрица «материал × размер»: сколько сырья уходит на 1 шт (с запасом на отходы) именно в этом размере.
+// rows — piece_table; sizes — [{размер, штук}]; total — подпись колонки «всего» (или '' без неё)
+function flSizeTableHtml(rows, sizes, total) {
+  const head = sizes.map((s) => `<th class="num">${s.размер ? esc(s.размер) : 'Все размеры'}${s.штук ? `<div class="cx-hint">${nf(s.штук)} шт</div>` : ''}</th>`).join('');
+  const body = rows.map((r) => {
+    const vals = sizes.map((s) => (r.по_размерам[s.размер] || {}).на_1_шт);
+    const known = vals.filter((v) => v !== undefined);
+    const varies = known.length > 1 && Math.max(...known) !== Math.min(...known);
+    const cells = sizes.map((s, i) => {
+      const c = r.по_размерам[s.размер];
+      return `<td class="num">${c ? (varies ? `<b>${flQty(c.на_1_шт, r.ед)}</b>` : flQty(c.на_1_шт, r.ед))
+        : '<span class="cx-hint" title="Для этого размера нормы нет">нет нормы</span>'}</td>`;
+    }).join('');
+    return `<tr><td>${esc(r.материал)}${r.параметры ? `<div class="cx-hint">${esc(r.параметры)}</div>` : ''}</td>
+      <td>${r.цвет ? esc(r.цвет) : '<span class="cx-hint">в цвет изделия</span>'}</td>${cells}
+      ${total ? `<td class="num"><b>${flQty(r.всего, r.ед)}</b></td>` : ''}</tr>`;
+  }).join('');
+  return `<div class="cx-scroll"><table class="cx-table cx-sizetable">
+    <thead><tr><th>Материал</th><th>Цвет</th>${head}${total ? `<th class="num">${total}</th>` : ''}</tr></thead>
+    <tbody>${body}</tbody></table></div>`;
+}
+
+// по модели заказа: расход на 1 шт по размерам и на всё количество (m — элемент «расход» заказа)
 function flSpecTableHtml(m) {
-  if (m.нет_спецификации) return flPerPieceHtml(m.модель, []);
-  return `${flPerPieceHtml(m.модель, m.строки)}
-    <div class="cx-scroll"><table class="cx-table">
-      <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Норма</th><th class="num">Запас</th><th class="num">На 1 шт</th><th class="num">На ${nf(m.штук)} шт</th></tr></thead>
-      <tbody>${m.строки.map((r) => `<tr><td>${esc(r.материал)}</td>
-        <td>${r.цвет ? esc(r.цвет) : '<span class="cx-hint">в цвет изделия</span>'}</td>
-        <td class="num">${nf(r.норма)} ${esc(r.ед)}</td><td class="num">${r.запас ? nf(r.запас) + ' %' : '—'}</td>
-        <td class="num"><b>${flQty(r.на_1_шт, r.ед)}</b></td><td class="num">${flQty(r.всего, r.ед)}</td></tr>`).join('')}</tbody>
-    </table></div>`;
+  if (m.нет_спецификации) return flNoSpecHtml(m.модель);
+  return `<div class="cx-hint" style="margin:10px 0 4px"><b>Модель ${esc(m.модель)}</b> · на 1 шт в каждом размере, с запасом на отходы</div>
+    ${flNoNormHtml(m.модель, m.без_нормы)}
+    ${flSizeTableHtml(m.строки, m.размеры, `Всего на ${nf(m.штук)} шт`)}`;
 }
 
-// для закройщика: расход на 1 шт, на партию по плану и на то, что ещё не раскроено (p — партия из cut_state)
+// для закройщика: расход на 1 шт по размерам партии, на партию по плану и на то, что ещё не раскроено (p — партия из cut_state)
 function flCutSpecHtml(p) {
   const r = p.расход;
   if (!r) return '';
-  if (r.нет_спецификации) return flPerPieceHtml(p.модель, []);
+  if (r.нет_спецификации) return flNoSpecHtml(p.модель);
+  const qty = {};
+  (p.строки || []).forEach((x) => { qty[x.размер] = (qty[x.размер] || 0) + (x.план || 0); });
   const key = (x) => `${x.материал}|${x.цвет}|${x.ед}`;
   const rest = Object.fromEntries((r.остаток || []).map((x) => [key(x), x]));
-  return `${flPerPieceHtml(p.модель, r.на_1_шт)}
+  return `<div class="cx-hint" style="margin:6px 0 4px"><b>Расход на 1 шт</b> в каждом размере партии, с запасом на отходы</div>
+    ${flNoNormHtml(p.модель, r.без_нормы)}
+    ${flSizeTableHtml(r.на_1_шт, r.размеры.map((sz) => ({ размер: sz, штук: qty[sz] || 0 })), '')}
+    <div class="cx-hint" style="margin:12px 0 4px"><b>Сколько сырья на партию</b> — по цветам</div>
     <div class="cx-scroll"><table class="cx-table">
       <thead><tr><th>Материал</th><th>Цвет</th><th class="num">На партию (${nf(p.план)} шт)</th><th class="num">Ещё не раскроено (${nf(p.остаток)} шт)</th></tr></thead>
       <tbody>${(r.план || []).map((x) => `<tr><td>${esc(x.материал)}</td><td>${esc(x.цвет)}</td>
@@ -195,10 +219,10 @@ function supplyCardHtml(o) {
         <thead><tr><th>Модель</th><th>Цвет</th><th>Размер</th><th class="num">Заказано</th><th class="num">Итог</th><th>Характеристики</th></tr></thead>
         <tbody>${card}</tbody></table></div>
       <h4 style="margin:18px 0 8px">Расход сырья: на 1 шт и на весь заказ</h4>
-      <div class="cx-hint" style="margin-bottom:8px">Считается по спецификации модели: норма × (1 + запас на отходы). Эти же цифры видят технолог и закройщик.</div>
+      <div class="cx-hint" style="margin-bottom:8px">Считается по спецификации модели: у каждого размера своя норма × (1 + запас на отходы) × количество. Эти же цифры видят технолог и закройщик.</div>
       ${(o.расход || []).map(flSpecTableHtml).join('')}
       <h4 style="margin:18px 0 8px">Сырьё на заказ — по цветам</h4>
-      ${miss.length ? `<div class="cx-notice warn">Нет спецификации для: <b>${miss.map(esc).join(', ')}</b> — заполните во вкладке «Спецификации».</div>` : ''}
+      ${miss.length ? `<div class="cx-notice warn">Нет нормы расхода для: <b>${miss.map(esc).join('; ')}</b> — это сырьё в расчёт не вошло. Заполните во вкладке «Спецификации».</div>` : ''}
       ${mats ? `<div class="cx-scroll"><table class="cx-table">
         <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно</th><th class="num">Принято рулонов</th><th>Есть / заказано</th><th>Статус</th><th>Комментарий</th></tr></thead>
         <tbody>${mats}</tbody></table></div>
@@ -231,28 +255,69 @@ async function flSaveSupply(done) {
   } catch (err) { toast(err.message, 'err'); }
 }
 
+// размеры, которые можно предложить: сетки из справочника + уже встречавшиеся у модели
+function flAllSizes() {
+  const out = [];
+  (ST.refs.размеры || []).forEach((g) => (g.размеры || []).forEach((v) => { if (!out.includes(String(v))) out.push(String(v)); }));
+  return out;
+}
+
+function flSizeSort(list) {
+  return list.slice().sort((x, y) => {
+    const a = parseFloat(String(x).replace(',', '.')), b = parseFloat(String(y).replace(',', '.'));
+    if (!isNaN(a) && !isNaN(b) && a !== b) return a - b;
+    return String(x).localeCompare(String(y), 'ru');
+  });
+}
+
+// строки спецификации из таблицы (плоский список с колонкой «размер») → строки редактора «материал × размер»
+function flBomToRows(lines) {
+  const rows = [];
+  const idx = {};
+  const sizes = [];
+  (lines || []).forEach((l) => {
+    const k = `${l.материал}|${l.цвет}`;
+    let r = idx[k];
+    if (!r) { r = idx[k] = { ...FL_NEW_ROW(), материал: l.материал, цвет: l.цвет, ед: l.ед || 'м', параметры: l.параметры || '', запас: l.запас || '' }; rows.push(r); }
+    if (l.размер) { r.размеры[l.размер] = l.норма; if (!sizes.includes(l.размер)) sizes.push(l.размер); }
+    else { r.норма = l.норма; r.ед = l.ед || r.ед; r.параметры = l.параметры || r.параметры; r.запас = l.запас || r.запас; }
+  });
+  return { rows, sizes };
+}
+
 function bomHtml() {
   const all = FL.supply.спецификации || {};
   const models = (ST.refs.модели || []).map((m) => m.модель);
   Object.keys(all).forEach((m) => { if (!models.includes(m)) models.push(m); });
-  const chips = models.map((m) => `<button class="rt-chip ${m === FL.bomModel ? 'on' : ''}" data-act="fl-bom-pick" data-model="${esc(m)}">${esc(m)}${all[m] ? ` · ${all[m].length}` : ''}</button>`).join('');
+  const chips = models.map((m) => `<button class="rt-chip ${m === FL.bomModel ? 'on' : ''}" data-act="fl-bom-pick" data-model="${esc(m)}">${esc(m)}${all[m] ? ` · ${flBomToRows(all[m]).rows.length}` : ''}</button>`).join('');
+  const sizeHead = FL.bomSizes.map((sz) => `<th class="num">${esc(sz)} <button class="btn ghost cx-xs" data-act="fl-bom-size-del" data-size="${esc(sz)}" title="Убрать размер ${esc(sz)}">✕</button></th>`).join('');
   const rows = FL.bomRows.map((r, i) => `<tr>
       <td><input class="input" data-fl-bom="${i}|материал" value="${esc(r.материал)}" placeholder="ткань, нитки, молния…"></td>
-      <td><input class="input" data-fl-bom="${i}|цвет" value="${esc(r.цвет)}" placeholder="пусто = в цвет изделия" list="fl-colors"></td>
-      <td><input class="input cx-mini" type="number" min="0" step="any" data-fl-bom="${i}|норма" value="${esc(r.норма)}"></td>
+      <td><input class="input" data-fl-bom="${i}|цвет" value="${esc(r.цвет)}" placeholder="в цвет изделия" list="fl-colors"></td>
       <td><input class="input cx-mini" data-fl-bom="${i}|ед" value="${esc(r.ед || 'м')}" list="fl-units"></td>
       <td><input class="input cx-mini" type="number" min="0" max="100" step="any" data-fl-bom="${i}|запас" value="${esc(r.запас || '')}" placeholder="0"></td>
+      <td><input class="input cx-mini" type="number" min="0" step="any" data-fl-bom="${i}|норма" value="${esc(r.норма)}" placeholder="—" title="Норма для всех размеров, у которых своя не указана"></td>
+      ${FL.bomSizes.map((sz) => `<td><input class="input cx-mini" type="number" min="0" step="any" data-fl-bsz="${i}|${esc(sz)}" value="${esc(r.размеры[sz] ?? '')}" placeholder="${r.норма !== '' && r.норма != null ? esc(r.норма) : '—'}"></td>`).join('')}
       <td><input class="input" data-fl-bom="${i}|параметры" value="${esc(r.параметры)}" placeholder="ширина, состав…"></td>
       <td><button class="btn ghost" data-act="fl-bom-del" data-i="${i}">✕</button></td></tr>`).join('');
-  return `<div class="cx-card"><div class="cx-card-h"><h3>Спецификация материалов (BOM) по артикулу</h3></div>
+  const seen = (FL.supply.размеры || {})[FL.bomModel] || [];
+  const missing = seen.filter((sz) => !FL.bomSizes.includes(sz));
+  return `<div class="cx-card"><div class="cx-card-h"><h3>Спецификация материалов по артикулу и размерам</h3></div>
     <div class="cx-card-b">
       <div class="cc-wait">${chips || '<span class="cx-hint">Справочник моделей пуст</span>'}</div>
       ${FL.bomModel ? `
         <datalist id="fl-colors">${(ST.refs.цвета || []).map((c) => `<option value="${esc(c.цвет)}">`).join('')}</datalist>
-        <div class="cx-scroll" style="margin-top:12px"><table class="cx-table">
-          <thead><tr><th>Сырьё / материал</th><th>Цвет</th><th>Норма на 1 шт</th><th>Ед.</th><th title="Запас на отходы и подрезку, %">Запас, %</th><th>Доп. параметры</th><th></th></tr></thead>
+        <datalist id="fl-sizes">${flAllSizes().map((v) => `<option value="${esc(v)}">`).join('')}</datalist>
+        <div class="cx-hint" style="margin-top:12px">У каждого размера свой расход: впишите норму на 1 шт в колонку нужного размера. Пустая ячейка размера — действует «Общая норма» из строки.</div>
+        <div class="cx-scroll" style="margin-top:8px"><table class="cx-table cx-sizetable">
+          <thead><tr><th>Сырьё / материал</th><th>Цвет</th><th>Ед.</th><th title="Запас на отходы и подрезку, %">Запас, %</th><th class="num" title="Для размеров, где своя норма не указана">Общая норма</th>${sizeHead}<th>Доп. параметры</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
         <datalist id="fl-units"><option value="г"><option value="кг"><option value="м"><option value="шт"><option value="бобина"></datalist>
+        <div class="cx-btn-row" style="margin-top:10px;align-items:center">
+          <input class="input cx-mini" id="fl-new-size" list="fl-sizes" placeholder="размер" style="max-width:110px">
+          <button class="btn" data-act="fl-bom-size-add">+ Размер</button>
+          ${missing.length ? `<button class="btn" data-act="fl-bom-size-all" title="Размеры, которые есть в заказах этой модели">+ Размеры из заказов (${missing.map(esc).join(', ')})</button>` : ''}
+        </div>
         <div class="cx-hint" style="margin-top:8px">Норму можно вносить в граммах («г») или килограммах («кг») — закройщик и технолог увидят вес. Запас — на отходы, его добавляют к норме.</div>
         <div id="fl-bom-preview" style="margin-top:12px">${flBomPreviewHtml()}</div>
         <div class="cx-btn-row" style="margin-top:10px">
@@ -262,12 +327,21 @@ function bomHtml() {
     </div></div>`;
 }
 
-// «Расход на 1 шт» прямо при вводе спецификации — как её увидят технолог и закройщик
+// «Расход на 1 шт» прямо при вводе спецификации — как его увидят технолог и закройщик
 function flBomPreviewHtml() {
-  const rows = FL.bomRows.filter((r) => String(r.материал || '').trim() && num(r.норма) > 0).map((r) => ({
-    материал: r.материал, цвет: r.цвет, ед: r.ед || 'м', запас: num(r.запас),
-    на_1_шт: Math.round(num(r.норма) * (1 + num(r.запас) / 100) * 10000) / 10000 }));
-  return rows.length ? flPerPieceHtml(FL.bomModel, rows) : '';
+  const sizes = FL.bomSizes.length ? FL.bomSizes : [''];
+  const rows = FL.bomRows.filter((r) => String(r.материал || '').trim()).map((r) => {
+    const by = {};
+    sizes.forEach((sz) => {
+      const own = sz ? r.размеры[sz] : '';
+      const norm = (own !== '' && own != null) ? num(own) : num(r.норма);
+      if (norm > 0) by[sz] = { на_1_шт: Math.round(norm * (1 + num(r.запас) / 100) * 10000) / 10000 };
+    });
+    return { материал: r.материал, цвет: r.цвет, ед: r.ед || 'м', параметры: '', по_размерам: by };
+  }).filter((r) => Object.keys(r.по_размерам).length);
+  if (!rows.length) return '';
+  return `<div class="cx-hint" style="margin-bottom:4px"><b>Так увидят технолог и закройщик</b> — на 1 шт, с запасом на отходы</div>
+    ${flSizeTableHtml(rows, sizes.map((sz) => ({ размер: sz, штук: 0 })), '')}`;
 }
 
 function rollsHtml() {
@@ -327,14 +401,40 @@ document.addEventListener('click', async (ev) => {
   if (act === 'fl-sub') { FL.supplyTab = el.dataset.tab; FL.num = ''; return render(); }
   if (act === 'fl-bom-pick') {
     FL.bomModel = el.dataset.model;
-    FL.bomRows = ((FL.supply.спецификации || {})[FL.bomModel] || []).map((r) => ({ ...r }));
+    const got = flBomToRows((FL.supply.спецификации || {})[FL.bomModel] || []);
+    FL.bomRows = got.rows;
+    // колонки размеров: из спецификации и из заказов этой модели
+    FL.bomSizes = flSizeSort([...new Set([...got.sizes, ...(((FL.supply.размеры || {})[FL.bomModel]) || [])])]);
     if (!FL.bomRows.length) FL.bomRows.push(FL_NEW_ROW());
     return render();
   }
   if (act === 'fl-bom-add') { FL.bomRows.push(FL_NEW_ROW()); return render(); }
   if (act === 'fl-bom-del') { FL.bomRows.splice(Number(el.dataset.i), 1); return render(); }
+  if (act === 'fl-bom-size-add') {
+    const v = String(($('#fl-new-size') || {}).value || '').trim();
+    if (!v) return toast('Впишите размер, например 44', 'err');
+    if (!FL.bomSizes.includes(v)) FL.bomSizes = flSizeSort([...FL.bomSizes, v]);
+    return render();
+  }
+  if (act === 'fl-bom-size-all') {
+    FL.bomSizes = flSizeSort([...new Set([...FL.bomSizes, ...(((FL.supply.размеры || {})[FL.bomModel]) || [])])]);
+    return render();
+  }
+  if (act === 'fl-bom-size-del') {
+    const sz = el.dataset.size;
+    const filled = FL.bomRows.some((r) => r.размеры[sz] !== '' && r.размеры[sz] != null);
+    if (filled && !confirm(`Убрать размер ${sz}? Введённые для него нормы пропадут.`)) return;
+    FL.bomSizes = FL.bomSizes.filter((x) => x !== sz);
+    FL.bomRows.forEach((r) => { delete r.размеры[sz]; });
+    return render();
+  }
   if (act === 'fl-bom-save') {
-    await flPost('/supply/bom', { модель: FL.bomModel, строки: FL.bomRows }, `Спецификация ${FL.bomModel} сохранена`);
+    const rows = FL.bomRows.map((r) => {
+      const by = {};
+      FL.bomSizes.forEach((sz) => { if (r.размеры[sz] !== '' && r.размеры[sz] != null) by[sz] = r.размеры[sz]; });
+      return { материал: r.материал, цвет: r.цвет, ед: r.ед, запас: r.запас, параметры: r.параметры, норма: r.норма, по_размерам: by };
+    });
+    await flPost('/supply/bom', { модель: FL.bomModel, строки: rows }, `Спецификация ${FL.bomModel} сохранена`);
     return;
   }
   if (act === 'fl-roll-add') {
@@ -356,8 +456,13 @@ document.addEventListener('input', (ev) => {
     if (total) total.textContent = nf(FL.rows.reduce((s, r) => s + num(r.итог), 0));
   }
   if (t.dataset.flMat) pick('flMat', FL.rows);
-  if (t.dataset.flBom) {
-    pick('flBom', FL.bomRows);
+  if (t.dataset.flBom || t.dataset.flBsz) {
+    if (t.dataset.flBom) pick('flBom', FL.bomRows);
+    else {
+      const raw = t.dataset.flBsz;
+      const cut = raw.indexOf('|');
+      FL.bomRows[Number(raw.slice(0, cut))].размеры[raw.slice(cut + 1)] = t.value;
+    }
     const box = document.getElementById('fl-bom-preview');
     if (box) box.innerHTML = flBomPreviewHtml();
   }

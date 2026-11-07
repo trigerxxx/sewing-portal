@@ -507,3 +507,12 @@ select.input {
   .pt-kids .cx-nrow { margin-left: 12px; }
   .pt-kids .cx-nrow::before { left: -14px; width: 10px; }
 }
+
+/* нормы расхода по размерам: матрица «материал × размер» */
+.cx-sizetable th.num, .cx-sizetable td.num { text-align: right; white-space: nowrap; }
+.cx-sizetable th .cx-hint { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.cx-sizetable input.cx-mini { width: 78px; }
+.cx-xs { padding: 0 6px; min-height: 0; line-height: 1.5; font-size: 11px; vertical-align: middle; }
+.cx-sizetable input.input:not(.cx-mini) { min-width: 150px; }
+.cx-sizetable td:first-child input.input { min-width: 190px; }
+#fl-new-size { min-width: 130px; }

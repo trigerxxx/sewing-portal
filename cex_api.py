@@ -97,9 +97,11 @@ PCARD = ("Производственная карта",
 PCARD_LOG = ("История карты",
              ["№ заказа", "дата", "кто", "модель", "цвет", "размер", "было", "стало", "комментарий"],
              [10, 16, 14, 12, 16, 9, 8, 8, 34])
+# «размер» пустой — норма общая для всех размеров; с размером — норма для него одного
+# и она заменяет общую (материал + цвет те же).
 BOM = ("Спецификация",
-       ["модель", "материал", "цвет", "норма на 1 шт", "ед.", "параметры", "запас %"],
-       [12, 26, 18, 13, 8, 30, 10])
+       ["модель", "материал", "цвет", "размер", "норма на 1 шт", "ед.", "параметры", "запас %"],
+       [12, 26, 18, 9, 13, 8, 30, 10])
 SUPPLY_SH = ("Снабжение",
              ["№ заказа", "материал", "цвет", "ед.", "нужно", "есть", "статус", "комментарий",
               "кто", "когда"],
@@ -585,11 +587,13 @@ def save_design(me: dict, body: dict) -> dict:
 
 
 def boms() -> dict[str, list[dict]]:
+    """Модель → строки спецификации как записаны; «размер» пустой — норма на все размеры."""
     out: dict[str, list[dict]] = {}
     for r in _rows(BOM):
         if _s(r.get("модель")) and _s(r.get("материал")):
             out.setdefault(_s(r.get("модель")), []).append({
                 "материал": _s(r.get("материал")), "цвет": _s(r.get("цвет")),
+                "размер": _norm_size(r.get("размер")),
                 "норма": _num(r.get("норма на 1 шт")), "ед": _s(r.get("ед.")),
                 "параметры": _s(r.get("параметры")), "запас": _num(r.get("запас %"))})
     return out
@@ -610,67 +614,162 @@ def _per_piece(line: dict) -> float:
     return line["норма"] * (1 + line.get("запас", 0) / 100)
 
 
-def consumption(model: str, bom: dict | None = None) -> list[dict]:
-    """Сколько сырья уходит на ОДНУ штуку модели — это читают снабженец, технолог и закройщик."""
+def bom_for_size(lines: list[dict], size: str = "") -> list[dict]:
+    """Нормы для одного размера: строка этого размера заменяет общую (размер пустой)
+    по той же паре «материал + цвет». Нормы других размеров не участвуют."""
+    size = _norm_size(size)
+    general: dict[tuple, dict] = {}
+    special: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for b in lines:
+        key = (b["материал"], b["цвет"])
+        if key not in order:
+            order.append(key)
+        if not b.get("размер"):
+            general[key] = b
+        elif size and b["размер"] == size:
+            special[key] = b
+    out = [special.get(k) or general.get(k) for k in order]
+    return [b for b in out if b and b["норма"] > 0]
+
+
+def piece_table(model: str, sizes: list[str], bom: dict) -> list[dict]:
+    """Расход на 1 шт по размерам: строка = материал + цвет + ед., по_размерам[размер] = ячейка."""
+    lines = bom.get(_s(model)) or []
+    rows: list[dict] = []
+    index: dict[tuple, dict] = {}
+    for size in sizes:
+        for b in bom_for_size(lines, size):
+            key = (b["материал"], b["цвет"], b["ед"])
+            row = index.get(key)
+            if row is None:
+                row = index[key] = {"материал": b["материал"], "цвет": b["цвет"], "ед": b["ед"],
+                                    "параметры": b["параметры"], "по_размерам": {}}
+                rows.append(row)
+            per = _per_piece(b)
+            row["по_размерам"][size] = {"норма": b["норма"], "запас": b["запас"],
+                                        "на_1_шт": round(per, 4), "граммы": _grams(per, b["ед"])}
+    return rows
+
+
+def consumption(model: str, bom: dict | None = None, size: str = "") -> list[dict]:
+    """Сколько сырья уходит на ОДНУ штуку модели в одном размере (пустой размер — общие нормы)."""
     lines = (boms() if bom is None else bom).get(_s(model)) or []
     return [{"материал": b["материал"], "цвет": b["цвет"], "ед": b["ед"], "норма": b["норма"],
              "запас": b.get("запас", 0), "на_1_шт": round(_per_piece(b), 4),
              "граммы": _grams(_per_piece(b), b["ед"]), "параметры": b["параметры"]}
-            for b in lines]
+            for b in bom_for_size(lines, size)]
 
 
 def model_specs(card: list[dict], bom: dict) -> list[dict]:
-    """По каждой модели карты: сколько штук, расход на 1 шт и на всё количество."""
-    qty: dict[str, int] = {}
+    """По каждой модели карты: сколько штук в каждом размере, расход на 1 шт по размерам
+    и на всё количество. «без_нормы» — размеры карты, для которых нормы нет."""
+    qty: dict[str, dict[str, int]] = {}
     for c in card:
-        qty[c["модель"]] = qty.get(c["модель"], 0) + c["итог"]
+        by_size = qty.setdefault(c["модель"], {})
+        by_size[c["размер"]] = by_size.get(c["размер"], 0) + c["итог"]
     out = []
-    for model, pieces in qty.items():
-        rows = consumption(model, bom)
+    for model, by_size in qty.items():
+        sizes = sorted(by_size, key=_size_key)
+        rows = piece_table(model, sizes, bom)
         for r in rows:
-            total = r["на_1_шт"] * pieces
+            total = sum(cell["на_1_шт"] * by_size[sz] for sz, cell in r["по_размерам"].items())
             r["всего"] = round(total, 3)
             r["всего_г"] = _grams(total, r["ед"])
-        out.append({"модель": model, "штук": pieces, "строки": rows, "нет_спецификации": not rows})
+        lines = bom.get(model) or []
+        out.append({"модель": model, "штук": sum(by_size.values()),
+                    "размеры": [{"размер": sz, "штук": by_size[sz]} for sz in sizes],
+                    "строки": rows, "нет_спецификации": not lines,
+                    "без_нормы": [sz for sz in sizes if lines and not bom_for_size(lines, sz)]})
     return out
 
 
+def model_sizes(bom: dict | None = None) -> dict[str, list[str]]:
+    """Модель → размеры, которые реально встречаются в заказах, картах и спецификации."""
+    found: dict[str, set] = {}
+
+    def add(model, size):
+        model, size = _s(model), _norm_size(size)
+        if model and size:
+            found.setdefault(model, set()).add(size)
+
+    for r in _rows(ORDERS):
+        add(r.get("модель"), r.get("размер"))
+    for r in _rows(PCARD):
+        add(r.get("модель"), r.get("размер"))
+    for model, lines in (boms() if bom is None else bom).items():
+        for b in lines:
+            add(model, b["размер"])
+    return {m: sorted(v, key=_size_key) for m, v in found.items()}
+
+
 def save_bom(me: dict, body: dict) -> dict:
-    """Спецификация одного артикула целиком (пустой список — удалить)."""
+    """Спецификация одного артикула целиком (пустой список — удалить).
+
+    Строка: материал, цвет, ед, запас, параметры; норма — общая для всех размеров («норма»)
+    и/или по размерам («по_размерам»: {"42": 320, "44": 340}). Норма размера заменяет общую.
+    """
     model = _s(body.get("модель"))
     if not model:
         raise ValueError("Укажите модель (артикул)")
     lines = []
+    seen: set[tuple] = set()
     for i, it in enumerate(body.get("строки") or [], start=1):
         mat = _s(it.get("материал"))
         if not mat:
             continue
-        norm = _num(it.get("норма"))
-        if norm <= 0:
-            raise ValueError(f"Строка {i} ({mat}): норма расхода должна быть больше нуля")
+        color = _s(it.get("цвет"))
+        if (mat.lower(), color.lower()) in seen:
+            raise ValueError(f"Строка {i}: «{mat}»{' (' + color + ')' if color else ''} указан дважды — "
+                             "нормы по размерам вносят в одной строке")
+        seen.add((mat.lower(), color.lower()))
         waste = _num(it.get("запас"))
         if waste < 0 or waste > 100:
             raise ValueError(f"Строка {i} ({mat}): запас на отходы — от 0 до 100 %")
-        lines.append({"модель": model, "материал": mat, "цвет": _s(it.get("цвет")),
-                      "норма на 1 шт": norm, "ед.": _s(it.get("ед")) or "м",
-                      "параметры": _s(it.get("параметры")), "запас %": waste or ""})
+        unit = _s(it.get("ед")) or "м"
+        common = {"модель": model, "материал": mat, "цвет": color, "ед.": unit,
+                  "параметры": _s(it.get("параметры")), "запас %": waste or ""}
+        got = 0
+        raw_common = _s(it.get("норма"))
+        if raw_common:
+            norm = _num(raw_common)
+            if norm <= 0:
+                raise ValueError(f"Строка {i} ({mat}): норма расхода должна быть больше нуля")
+            lines.append(dict(common, **{"размер": "", "норма на 1 шт": norm}))
+            got += 1
+        per_size = it.get("по_размерам") or {}
+        for size in sorted(per_size, key=_size_key):
+            raw = _s(per_size[size])
+            if not raw:
+                continue  # пусто — для этого размера действует общая норма
+            norm = _num(raw)
+            if norm <= 0:
+                raise ValueError(f"Строка {i} ({mat}): норма для размера {size} должна быть больше нуля")
+            lines.append(dict(common, **{"размер": _norm_size(size), "норма на 1 шт": norm}))
+            got += 1
+        if not got:
+            raise ValueError(f"Строка {i} ({mat}): укажите норму — общую или по размерам")
     rows = [r for r in _rows(BOM) if _s(r.get("модель")) != model] + lines
     store.write_sheet(BOM[0], BOM[1], rows)
     return {"модель": model, "строк": len(lines)}
 
 
 def supply_need(card: list[dict], bom: dict) -> tuple[list[dict], list[str]]:
-    """Сколько сырья нужно на карту: норма × (1 + запас) × итог.
-    Пустой цвет в спецификации = в цвет изделия."""
+    """Сколько сырья нужно на карту: норма размера × (1 + запас) × итог по каждой строке карты.
+    Пустой цвет в спецификации = в цвет изделия. Во втором значении — модели без спецификации
+    и размеры, для которых нормы нет."""
     need: dict[tuple, float] = {}
     missing: list[str] = []
     for c in card:
         lines = bom.get(c["модель"])
-        if not lines:
-            if c["модель"] not in missing:
-                missing.append(c["модель"])
+        size = c.get("размер", "")
+        eff = bom_for_size(lines, size) if lines else []
+        if not eff:
+            label = c["модель"] if not lines or not size else f'{c["модель"]}, размер {size}'
+            if label not in missing:
+                missing.append(label)
             continue
-        for b in lines:
+        for b in eff:
             k = (b["материал"], b["цвет"] or c["цвет"], b["ед"])
             need[k] = need.get(k, 0) + _per_piece(b) * c["итог"]
     return ([{"материал": k[0], "цвет": k[1], "ед": k[2], "нужно": round(v, 3),
@@ -739,7 +838,7 @@ def supply_state() -> dict:
             o["расход"] = model_specs(o["карта"], bom)
             queue_.append(o)
     return {"очередь": queue_, "спецификации": bom, "рулоны": list(roll_registry().values())[::-1][:300],
-            "расход": {m: consumption(m, bom) for m in bom},
+            "размеры": model_sizes(bom),
             "статусы": list(SUPPLY_STATUSES)}
 
 
@@ -811,17 +910,20 @@ def rate_of(code: str, default: float = 0.0) -> float:
 
 
 def party_consumption(party: dict, bom: dict) -> dict:
-    """Сырьё для закройщика: на 1 шт, на всю партию по плану и на то, что ещё не раскроено."""
+    """Сырьё для закройщика: на 1 шт по размерам партии, на всю партию по плану
+    и на то, что ещё не раскроено (по цветам)."""
     model = party["модель"]
+    sizes = sorted({r["размер"] for r in party["строки"]}, key=_size_key)
+    lines = bom.get(model) or []
 
     def need(key: str) -> list[dict]:
-        card = [{"модель": model, "цвет": r["цвет"], "итог": r[key]}
+        card = [{"модель": model, "цвет": r["цвет"], "размер": r["размер"], "итог": r[key]}
                 for r in party["строки"] if r[key] > 0]
         return supply_need(card, bom)[0]
 
-    per = consumption(model, bom)
-    return {"на_1_шт": per, "план": need("план"), "остаток": need("остаток"),
-            "нет_спецификации": not per}
+    return {"размеры": sizes, "на_1_шт": piece_table(model, sizes, bom),
+            "план": need("план"), "остаток": need("остаток"), "нет_спецификации": not lines,
+            "без_нормы": [sz for sz in sizes if lines and not bom_for_size(lines, sz)]}
 
 
 def cut_state() -> dict:
