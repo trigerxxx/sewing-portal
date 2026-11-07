@@ -4,6 +4,7 @@ backups/
 master/
 secrets/
 *.xlsm
+!workbook/цех_склад для apk.xlsm
 *.jks
 *.keystore
 *.p12

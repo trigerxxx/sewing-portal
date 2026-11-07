@@ -27,6 +27,10 @@ BACKUP_DIR = BASE / "backups" / "cex"
 SRC_FILE = DATA / "цех_источник.txt"
 STATE_FILE = DATA / "cex_state.json"
 DEFAULT_SRC = Path("/Users/temp/швейный цех приложение/цех_склад для apk.xlsm")
+# Эталон книги лежит в репозитории (workbook/). Сервер пишет прямо в книгу, поэтому работает
+# с копией в data/: файл в git остаётся нетронутым, а правки не попадают в коммиты.
+TEMPLATE = BASE / "workbook" / "цех_склад для apk.xlsm"
+LOCAL_COPY = DATA / "цех_склад для apk.xlsm"
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 RNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -56,6 +60,13 @@ def source_path() -> Path:
         raw = SRC_FILE.read_text(encoding="utf-8").strip()
         if raw:
             return Path(raw).expanduser()
+    if DEFAULT_SRC.is_file():
+        return DEFAULT_SRC
+    if TEMPLATE.is_file():
+        if not LOCAL_COPY.is_file():
+            LOCAL_COPY.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(TEMPLATE, LOCAL_COPY)
+        return LOCAL_COPY
     return DEFAULT_SRC
 
 

@@ -148,6 +148,9 @@ def back() -> None:
         store.SRC_FILE.write_text(BACKUP_PTR.read_text(encoding="utf-8"), encoding="utf-8")
         BACKUP_PTR.unlink()
         print("Источник возвращён:", store.source_path())
+    elif store.SRC_FILE.exists() and Path(store.SRC_FILE.read_text("utf-8").strip()) == DEMO:
+        store.SRC_FILE.unlink()  # дальше сервер сам возьмёт рабочую книгу (или копию из workbook/)
+        print("Демо отключено. Источник:", store.source_path())
     else:
         print("Нечего возвращать: демо не запускалось.")
 
