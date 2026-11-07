@@ -155,7 +155,7 @@ async function ccSave() {
     ccReset(true);
     await loadCut();
     render();
-    toast(`Карта №${res.карта}: разделы ${res.настилы}, ${nf(res.штук)} шт · ${nf(res.сумма)} сом`, 'ok');
+    flStockToast(`Карта №${res.карта}: разделы ${res.настилы}, ${nf(res.штук)} шт · ${nf(res.сумма)} сом`, res.склад);
   } catch (err) { toast(err.message, 'err'); }
 }
 

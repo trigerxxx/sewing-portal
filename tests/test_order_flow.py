@@ -277,5 +277,169 @@ class ConsumptionTests(unittest.TestCase):
         self.assertIsNone(elastic["рулоны"])                      # метры — подсказки нет
 
 
+class WarehouseTests(unittest.TestCase):
+    """Склад сырья («холодильник»): приход, остаток, резерв и автосписание при крое по норме размера."""
+
+    def setUp(self):
+        self._old = cex_api.store
+        cex_api.store = self.st = FakeStore()
+        base = {"№ заказа": 9, "дата": "07.11.2026", "клиент": "Свой цех", "источник": cex_api.OWN,
+                "категория": "Брюки", "модель": "477", "цвет": "бежевый", "статус": cex_api.DESIGN}
+        self.st.sheets[cex_api.ORDERS[0]] = [dict(base, размер="42", количество=100)]
+        cex_api.save_design(ME, {"номер": "9", "готово": True, "позиции": [
+            {"модель": "477", "цвет": "бежевый", "размер": "42", "итог": 100},
+            {"модель": "477", "цвет": "светло-серый", "размер": "44", "итог": 50}]})
+        cex_api.save_bom(ME, {"модель": "477", "строки": [
+            {"материал": "Футер", "норма": 320, "ед": "г", "запас": 5, "по_размерам": {"44": 340}},
+            {"материал": "Резинка", "цвет": "чёрный", "норма": 0.4, "ед": "м"},
+            {"материал": "Нитки", "норма": 0.05, "ед": "кг"}]})
+        cex_api.save_supply(ME, {"номер": "9", "готово": True, "строки": []})
+
+    def tearDown(self):
+        cex_api.store = self._old
+
+    # ---- помощники
+    def stock_up(self):
+        for mat, color, qty, unit in (("Футер", "бежевый", 100, "кг"), ("Футер", "светло-серый", 100, "кг"),
+                                      ("Нитки", "", 10, "кг"), ("Резинка", "чёрный", 100, "м")):
+            cex_api.wh_receive(ME, {"материал": mat, "цвет": color, "количество": qty, "ед": unit})
+
+    def accept(self):
+        cex_api.apply_decision(ME, {"номер": "9", "позиции": [
+            {"модель": "477", "цвет": "бежевый", "размер": "42", "количество": 100},
+            {"модель": "477", "цвет": "светло-серый", "размер": "44", "количество": 50}]})
+        return next(p for p in cex_api.cut_state()["партии"] if p["заказ"] == "9")["номер"]
+
+    def have(self, material, color=""):
+        pos = {(x["материал"], x["цвет"]): x for x in cex_api.wh_state()["позиции"]}
+        return pos[(material, color)]
+
+    # ---- приход и остаток
+    def test_receive_converts_units_and_creates_item(self):
+        cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 100, "ед": "кг"})
+        cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 5000, "ед": "г"})
+        pos = self.have("Футер", "бежевый")
+        self.assertEqual((pos["остаток"], pos["ед"]), (105.0, "кг"))
+        with self.assertRaises(ValueError):                       # метры в килограммы не переводим
+            cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 3, "ед": "м"})
+        with self.assertRaises(ValueError):
+            cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 0})
+
+    def test_adjust_writes_difference(self):
+        cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 100, "ед": "кг"})
+        res = cex_api.wh_adjust(ME, {"материал": "Футер", "цвет": "бежевый", "остаток": 90})
+        self.assertEqual((res["изменение"], res["остаток"]), (-10.0, 90.0))
+        journal = cex_api.wh_state()["движения"]
+        self.assertEqual([j["тип"] for j in journal], ["корректировка", "приход"])
+        with self.assertRaises(ValueError):
+            cex_api.wh_adjust(ME, {"материал": "Футер", "цвет": "бежевый", "остаток": -1})
+
+    def test_roll_registry_feeds_stock(self):
+        res = cex_api.add_roll(ME, {"код": "R-1", "материал": "Футер", "цвет": "бежевый", "вес": 25})
+        self.assertTrue(res["склад"]["записан"])
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 25.0)
+        res = cex_api.add_roll(ME, {"код": "R-2", "вес": 10})     # материал не указан
+        self.assertFalse(res["склад"]["записан"])
+        self.assertEqual(len(cex_api.wh_state()["движения"]), 1)
+
+    # ---- снабжение видит склад
+    def test_supply_line_shows_stock_and_shortage(self):
+        cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 30, "ед": "кг"})
+        order = cex_api.supply_state()["очередь"]
+        self.assertEqual(order, [])                               # заказ уже ушёл технологу
+        # вернём заказ снабженцу и посмотрим строки
+        for r in self.st.sheets[cex_api.ORDERS[0]]:
+            r["статус"] = cex_api.SUPPLYING
+        lines = {(x["материал"], x["цвет"]): x for x in cex_api.supply_state()["очередь"][0]["сырьё"]}
+        felt = lines[("Футер", "бежевый")]["склад"]
+        self.assertEqual((felt["остаток"], felt["нужно_в_ед"], felt["не_хватает"]), (30.0, 33.6, 3.6))
+        self.assertFalse(lines[("Футер", "светло-серый")]["склад"]["позиция"])   # такого на складе нет
+
+    def test_colourless_material_is_shared_between_colours_of_order(self):
+        """Нитки без цвета на складе одни на все цвета заказа: хватает не каждой строке отдельно."""
+        cex_api.wh_receive(ME, {"материал": "Нитки", "количество": 6, "ед": "кг"})
+        for r in self.st.sheets[cex_api.ORDERS[0]]:
+            r["статус"] = cex_api.SUPPLYING
+        threads = [x for x in cex_api.supply_state()["очередь"][0]["сырьё"] if x["материал"] == "Нитки"]
+        self.assertEqual(len(threads), 2)                       # бежевый 5 кг и светло-серый 2,5 кг
+        short = sorted(x["склад"]["не_хватает"] for x in threads)
+        self.assertEqual(short, [0.0, 1.5])                     # 6 кг: первой строке хватило, второй не хватает 1,5
+
+    # ---- автосписание при крое
+    def test_cut_writes_off_by_size_norm(self):
+        self.stock_up()
+        num = self.accept()
+        res = cex_api.save_cut(ME, {"партия": num, "позиции": [
+            {"цвет": "бежевый", "размер": "42", "факт": 40},
+            {"цвет": "светло-серый", "размер": "44", "факт": 50}]})
+        self.assertEqual(res["склад"]["предупреждения"], [])
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 86.56)          # 100 − 0,336 × 40
+        self.assertEqual(self.have("Футер", "светло-серый")["остаток"], 82.15)     # 100 − 0,357 × 50 (норма 44-го)
+        self.assertEqual(self.have("Нитки")["остаток"], 5.5)                        # 0,05 кг × 90 шт, без цвета
+        self.assertEqual(self.have("Резинка", "чёрный")["остаток"], 64.0)           # 0,4 м × 90 шт
+        used = {(x["материал"], x["цвет"]): x["количество"] for x in res["склад"]["списано"]}
+        self.assertEqual(used[("Футер", "бежевый")], 13.44)
+        rows = [m for m in cex_api.wh_state()["движения"] if m["тип"] == "расход"]
+        self.assertTrue(rows and all(m["партия"] == num and m["изменение"] < 0 for m in rows))
+
+    def test_cut_without_stock_goes_negative_and_is_visible(self):
+        num = self.accept()
+        cex_api.save_cut(ME, {"партия": num, "позиции": [{"цвет": "бежевый", "размер": "42", "факт": 10}]})
+        pos = self.have("Футер", "бежевый")
+        self.assertEqual(pos["остаток"], -3.36)
+        self.assertTrue(pos["минус"])
+
+    def test_unit_mismatch_is_reported_not_written(self):
+        cex_api.wh_item(ME, {"материал": "Резинка", "цвет": "чёрный", "ед": "кг"})   # на складе в кг, в справочнике в м
+        num = self.accept()
+        res = cex_api.save_cut(ME, {"партия": num, "позиции": [{"цвет": "бежевый", "размер": "42", "факт": 10}]})
+        self.assertTrue(any("Резинка" in w and "не списано" in w for w in res["склад"]["предупреждения"]))
+        self.assertEqual(self.have("Резинка", "чёрный")["остаток"], 0.0)
+
+    def test_size_without_norm_is_not_written_off(self):
+        cex_api.save_bom(ME, {"модель": "477", "строки": [
+            {"материал": "Футер", "ед": "г", "по_размерам": {"42": 300}}]})        # для 44-го нормы нет
+        self.stock_up()
+        num = self.accept()
+        res = cex_api.save_cut(ME, {"партия": num, "позиции": [
+            {"цвет": "бежевый", "размер": "42", "факт": 10}, {"цвет": "светло-серый", "размер": "44", "факт": 10}]})
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 97.0)
+        self.assertEqual(self.have("Футер", "светло-серый")["остаток"], 100.0)
+        self.assertTrue(any("477, размер 44" in w for w in res["склад"]["предупреждения"]))
+
+    # ---- резерв
+    def test_reserve_follows_unfinished_parties(self):
+        self.stock_up()
+        self.accept()
+        pos = self.have("Футер", "бежевый")
+        self.assertEqual((pos["остаток"], pos["резерв"], pos["свободно"]), (100.0, 33.6, 66.4))
+        num = next(p for p in cex_api.cut_state()["партии"] if p["заказ"] == "9")["номер"]
+        cex_api.save_cut(ME, {"партия": num, "позиции": [{"цвет": "бежевый", "размер": "42", "факт": 40}]})
+        pos = self.have("Футер", "бежевый")
+        self.assertEqual((pos["остаток"], pos["резерв"]), (86.56, 20.16))           # осталось раскроить 60 шт
+
+    # ---- исправление технолога
+    def test_fix_cut_returns_or_takes_more(self):
+        self.stock_up()
+        num = self.accept()
+        cex_api.save_cut(ME, {"партия": num, "позиции": [{"цвет": "бежевый", "размер": "42", "факт": 40}]})
+        nas = cex_api.cut_state()["партии"][0]["настилы"][0]["настил"]
+        cex_api.fix_cut(ME, {"партия": num, "строки": [{"настил": nas, "цвет": "бежевый", "размер": "42", "факт": 30}]})
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 89.92)           # вернули 10 шт × 0,336
+        self.assertIn("возврат", [m["тип"] for m in cex_api.wh_state()["движения"]])
+        cex_api.fix_cut(ME, {"партия": num, "строки": [{"настил": nas, "цвет": "бежевый", "размер": "42", "факт": 35}]})
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 88.24)           # докинули 5 шт
+
+    def test_fix_of_old_cut_without_writeoff_does_not_inflate_stock(self):
+        self.stock_up()
+        num = self.accept()
+        cex_api.save_cut(ME, {"партия": num, "позиции": [{"цвет": "бежевый", "размер": "42", "факт": 40}]})
+        self.st.sheets[cex_api.WH_MOVES[0]] = [m for m in self.st.sheets[cex_api.WH_MOVES[0]] if m["тип"] == "приход"]
+        nas = cex_api.cut_state()["партии"][0]["настилы"][0]["настил"]
+        res = cex_api.fix_cut(ME, {"партия": num, "строки": [{"настил": nas, "цвет": "бежевый", "размер": "42", "факт": 30}]})
+        self.assertEqual(res["склад"]["движений"], 0)
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()

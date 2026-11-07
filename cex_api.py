@@ -110,6 +110,14 @@ STOCK_ROLLS = ("Поступление рулонов",
                ["код рулона", "дата", "материал", "цвет", "граммаж г", "вес кг", "№ заказа",
                 "поставщик", "внёс"],
                [16, 16, 24, 18, 11, 9, 10, 20, 14])
+# Склад сырья («холодильник»): каталог позиций и журнал движений. Остаток не хранится —
+# он считается из журнала (приход +, расход −, возврат +, корректировка ±), поэтому не «уплывает».
+WH_ITEMS = ("Склад сырья", ["материал", "цвет", "ед.", "мин. остаток", "комментарий"],
+            [26, 18, 8, 12, 30])
+WH_MOVES = ("Движение сырья",
+            ["id", "дата", "тип", "материал", "цвет", "ед.", "изменение", "партия", "настил",
+             "заказ", "кто", "комментарий"],
+            [7, 16, 13, 26, 18, 8, 12, 9, 8, 9, 14, 44])
 SUPPLY_STATUSES = ("есть на складе", "заказано", "не хватает")
 OWN = "свой цех"
 SUPPLIER = "поставщик"
@@ -156,7 +164,7 @@ def ensure_sheets() -> None:
     specs = [MODELS, COLORS, SIZES, ORDERS, PARTIES, TECH, CUT, OUT, ROUTE, PACK,
              STAFF, SHIFTS, RATES, SALARY, ROUTE_MODEL, ROUTE_PARTY, ASSIGN, ITEM_LABELS, CARDS, ROLLS, PATTERNS,
              ROUTE_ORD, ROUTE_ORD_MODEL, ROUTE_ORD_PARTY, ROUTE_FIN, ROUTE_FIN_MODEL, ROUTE_FIN_PARTY,
-             PCARD, PCARD_LOG, BOM, SUPPLY_SH, STOCK_ROLLS]
+             PCARD, PCARD_LOG, BOM, SUPPLY_SH, STOCK_ROLLS, WH_ITEMS, WH_MOVES]
     store.ensure_sheets(specs)
     for name, headers, _ in specs:
         if store.first_row(name) != headers:
@@ -828,6 +836,26 @@ def roll_registry() -> dict[str, dict]:
     return out
 
 
+def wh_line(line: dict, items: dict, bal: dict, held: dict, left: dict) -> dict:
+    """Что со складом по одной строке потребности: остаток, свободно (за вычетом партий в крое), нехватка.
+    left — сколько свободного ещё не «занято» предыдущими строками заказа: материал без цвета (нитки)
+    берётся из одной позиции склада для всех цветов заказа, и его хватает не на каждую строку отдельно."""
+    it = wh_find(items, line["материал"], line["цвет"])
+    if it is None:
+        return {"позиция": False}
+    q = _convert(line["нужно"], line["ед"], it["ед"])
+    if q is None:
+        return {"позиция": True, "ед": it["ед"], "единицы_не_сходятся": True}
+    k = _wh_key(it["материал"], it["цвет"])
+    have, reserve = bal.get(k, 0.0), held.get(k, 0.0)
+    free = round(have - reserve, 4)
+    avail = left.setdefault(k, free)
+    cover = min(q, max(avail, 0.0))
+    left[k] = round(avail - cover, 4)
+    return {"позиция": True, "ед": it["ед"], "остаток": have, "резерв": reserve, "свободно": free,
+            "нужно_в_ед": round(q, 4), "не_хватает": round(q - cover, 4)}
+
+
 def supply_state() -> dict:
     bom, cards = boms(), pcards()
     queue_ = []
@@ -837,8 +865,16 @@ def supply_state() -> dict:
             o["сырьё"], o["без_спецификации"] = supply_lines(o, bom, cards)
             o["расход"] = model_specs(o["карта"], bom)
             queue_.append(o)
+    items = wh_items()
+    if queue_:
+        bal, held = wh_balances(), wh_reserved(bom, items)
+        for o in queue_:
+            left: dict = {}
+            for m in o["сырьё"]:
+                m["склад"] = wh_line(m, items, bal, held, left)
+    names = sorted({i["материал"] for i in items.values()}, key=str.lower)
     return {"очередь": queue_, "спецификации": bom, "рулоны": list(roll_registry().values())[::-1][:300],
-            "размеры": model_sizes(bom),
+            "размеры": model_sizes(bom), "материалы": names,
             "статусы": list(SUPPLY_STATUSES)}
 
 
@@ -886,7 +922,254 @@ def add_roll(me: dict, body: dict) -> dict:
            "вес кг": weight, "№ заказа": _s(body.get("заказ")),
            "поставщик": _s(body.get("поставщик")), "внёс": _s(me.get("логин"))}
     store.append_rows(STOCK_ROLLS[0], STOCK_ROLLS[1], [row])
-    return {"код": code}
+    # рулон — это приход на склад: вес сразу попадает в остаток материала и цвета
+    stock = {"записан": False, "сообщение": "материал не указан — на склад не записан"}
+    if row["материал"]:
+        try:
+            res = wh_receive(me, {"материал": row["материал"], "цвет": row["цвет"], "количество": weight,
+                                  "ед": "кг", "заказ": row["№ заказа"], "комментарий": f"рулон {code}"})
+            stock = {"записан": True, "остаток": res["остаток"], "ед": res["ед"],
+                     "сообщение": f"на складе {res['материал']}: {res['остаток']:g} {res['ед']}"}
+        except ValueError as exc:
+            stock = {"записан": False, "сообщение": str(exc)}
+    return {"код": code, "склад": stock}
+
+
+# --------------------------------------------------- склад сырья («холодильник»)
+# Справочник товара (нормы по размерам) говорит, сколько сырья уходит на штуку; снабжение
+# считает потребность заказа; склад хранит остаток и сам списывает сырьё, когда закройщик
+# сохраняет крой: норма размера (с запасом на отходы) × раскроенное количество.
+def _unit_key(unit) -> str:
+    return _s(unit).lower().rstrip(".")
+
+
+def _convert(qty: float, frm, to):
+    """Количество из одной единицы в другую: г ↔ кг считаем, одинаковые — как есть, иначе None."""
+    a, b = _unit_key(frm), _unit_key(to)
+    if not a or not b or a == b:
+        return qty
+    ga, gb = _GRAM_UNITS.get(a), _GRAM_UNITS.get(b)
+    return qty * ga / gb if ga and gb else None
+
+
+def _stock_unit(unit) -> str:
+    """В чём вести новую позицию склада: вес — в килограммах, остальное — как в норме."""
+    return "кг" if _unit_key(unit) in _GRAM_UNITS else (_s(unit) or "шт")
+
+
+def _wh_key(material, color) -> tuple:
+    return (_s(material).lower(), _s(color).lower())
+
+
+def wh_items() -> dict[tuple, dict]:
+    out = {}
+    for r in _rows(WH_ITEMS):
+        m = _s(r.get("материал"))
+        if m:
+            out[_wh_key(m, r.get("цвет"))] = {
+                "материал": m, "цвет": _s(r.get("цвет")), "ед": _s(r.get("ед.")) or "кг",
+                "мин": _num(r.get("мин. остаток")), "комментарий": _s(r.get("комментарий"))}
+    return out
+
+
+def wh_find(items: dict, material, color):
+    """Позиция склада для материала и цвета; материал без цвета (молния, нитки) подходит к любому цвету."""
+    return items.get(_wh_key(material, color)) or items.get(_wh_key(material, ""))
+
+
+def wh_balances(moves: list[dict] | None = None) -> dict[tuple, float]:
+    bal: dict[tuple, float] = {}
+    for r in (_rows(WH_MOVES) if moves is None else moves):
+        k = _wh_key(r.get("материал"), r.get("цвет"))
+        bal[k] = round(bal.get(k, 0.0) + _num(r.get("изменение")), 4)
+    return bal
+
+
+def wh_reserved(bom: dict | None = None, items: dict | None = None) -> dict[tuple, float]:
+    """Сколько сырья ещё понадобится партиям, раскроенным не до конца (в единицах склада)."""
+    items = wh_items() if items is None else items
+    out: dict[tuple, float] = {}
+    for p in cut_state()["партии"]:
+        if p["остаток"] <= 0 or p["статус"] not in ("крой", "в производстве"):
+            continue
+        for n in (p.get("расход") or {}).get("остаток") or []:
+            it = wh_find(items, n["материал"], n["цвет"])
+            q = _convert(n["нужно"], n["ед"], it["ед"]) if it else None
+            if q is not None:
+                k = _wh_key(it["материал"], it["цвет"])
+                out[k] = round(out.get(k, 0.0) + q, 4)
+    return out
+
+
+def wh_state() -> dict:
+    items, moves = wh_items(), _rows(WH_MOVES)
+    bal, res = wh_balances(moves), wh_reserved(None, items)
+    seen = set(items)
+    for r in moves:  # движения по позиции, которой нет в каталоге (правка руками): показываем и её
+        k = _wh_key(r.get("материал"), r.get("цвет"))
+        if k not in seen and _s(r.get("материал")):
+            seen.add(k)
+            items[k] = {"материал": _s(r.get("материал")), "цвет": _s(r.get("цвет")),
+                        "ед": _s(r.get("ед.")) or "кг", "мин": 0.0, "комментарий": ""}
+    rows = []
+    for k, it in items.items():
+        have, held = bal.get(k, 0.0), res.get(k, 0.0)
+        rows.append({"материал": it["материал"], "цвет": it["цвет"], "ед": it["ед"], "остаток": have,
+                     "резерв": held, "свободно": round(have - held, 4), "мин": it["мин"],
+                     "мало": bool(it["мин"] and have < it["мин"]), "минус": have < 0,
+                     "комментарий": it["комментарий"]})
+    rows.sort(key=lambda x: (x["материал"].lower(), x["цвет"].lower()))
+    journal = [{"id": _int(r.get("id")), "дата": _s(r.get("дата")), "тип": _s(r.get("тип")),
+                "материал": _s(r.get("материал")), "цвет": _s(r.get("цвет")), "ед": _s(r.get("ед.")),
+                "изменение": _num(r.get("изменение")), "партия": _s(r.get("партия")),
+                "настил": _s(r.get("настил")), "заказ": _s(r.get("заказ")), "кто": _s(r.get("кто")),
+                "комментарий": _s(r.get("комментарий"))} for r in moves[::-1][:300]]
+    return {"позиции": rows, "движения": journal, "единицы": ["кг", "г", "м", "шт", "бобина"]}
+
+
+def _wh_move(existing: list[dict], kind: str, item: dict, delta: float, who: str, now: str,
+             party="", nastil="", order="", note="") -> dict:
+    new_id = max([_int(r.get("id")) for r in existing] or [0]) + 1
+    return {"id": new_id, "дата": now, "тип": kind, "материал": item["материал"], "цвет": item["цвет"],
+            "ед.": item["ед"], "изменение": round(delta, 4), "партия": party, "настил": nastil,
+            "заказ": order, "кто": who, "комментарий": note}
+
+
+def _wh_item_row(it: dict) -> dict:
+    return {"материал": it["материал"], "цвет": it["цвет"], "ед.": it["ед"],
+            "мин. остаток": it["мин"] or "", "комментарий": it["комментарий"]}
+
+
+def _wh_target(body: dict):
+    """Позиция склада из тела запроса; если её нет — новая (единица как вносят, вес — в кг)."""
+    mat, color = _s(body.get("материал")), _s(body.get("цвет"))
+    if not mat:
+        raise ValueError("Укажите материал")
+    unit_in = _s(body.get("ед"))
+    found = wh_items().get(_wh_key(mat, color))
+    if found:
+        return found, False, unit_in or found["ед"]
+    return ({"материал": mat, "цвет": color, "ед": _stock_unit(unit_in or "кг"), "мин": 0.0,
+             "комментарий": ""}, True, unit_in or "кг")
+
+
+def _wh_save(moves: list[dict], new_move: dict, item: dict, is_new: bool) -> None:
+    writes = [(WH_MOVES[0], WH_MOVES[1], moves + [new_move])]
+    if is_new:
+        writes.append((WH_ITEMS[0], WH_ITEMS[1], _rows(WH_ITEMS) + [_wh_item_row(item)]))
+    store.write_sheets(writes)
+
+
+def wh_receive(me: dict, body: dict) -> dict:
+    """Приход сырья на склад: материал, цвет, количество, ед. (г пересчитаются в кг)."""
+    item, is_new, unit_in = _wh_target(body)
+    qty = _num(body.get("количество"))
+    if qty <= 0:
+        raise ValueError("Количество должно быть больше нуля")
+    q = _convert(qty, unit_in, item["ед"])
+    if q is None:
+        raise ValueError(f"{item['материал']}: на складе учёт в «{item['ед']}», а вносите в «{unit_in}» — "
+                         "единицы не сходятся")
+    moves = _rows(WH_MOVES)
+    who = _s(me.get("фио")) or _s(me.get("логин"))
+    row = _wh_move(moves, "приход", item, q, who, _now(), order=_s(body.get("заказ")),
+                   note=_s(body.get("комментарий")))
+    _wh_save(moves, row, item, is_new)
+    return {"материал": item["материал"], "цвет": item["цвет"], "ед": item["ед"], "приход": round(q, 4),
+            "остаток": wh_balances(moves + [row]).get(_wh_key(item["материал"], item["цвет"]), 0.0)}
+
+
+def wh_adjust(me: dict, body: dict) -> dict:
+    """Инвентаризация: «на складе на самом деле столько» — разница пишется корректировкой."""
+    item, is_new, unit_in = _wh_target(body)
+    if _s(body.get("остаток")) == "":
+        raise ValueError("Укажите, сколько сырья на складе по факту")
+    target = _num(body.get("остаток"))
+    if target < 0:
+        raise ValueError("Остаток не может быть отрицательным")
+    t = _convert(target, unit_in, item["ед"])
+    if t is None:
+        raise ValueError(f"{item['материал']}: на складе учёт в «{item['ед']}», а вносите в «{unit_in}» — "
+                         "единицы не сходятся")
+    moves = _rows(WH_MOVES)
+    cur = wh_balances(moves).get(_wh_key(item["материал"], item["цвет"]), 0.0)
+    if abs(t - cur) < 1e-9 and not is_new:
+        return {"материал": item["материал"], "цвет": item["цвет"], "ед": item["ед"],
+                "изменение": 0.0, "остаток": cur}
+    who = _s(me.get("фио")) or _s(me.get("логин"))
+    note = (_s(body.get("комментарий")) + "; " if _s(body.get("комментарий")) else "") + f"было {cur:g}, стало {t:g}"
+    row = _wh_move(moves, "корректировка", item, t - cur, who, _now(), note=note)
+    _wh_save(moves, row, item, is_new)
+    return {"материал": item["материал"], "цвет": item["цвет"], "ед": item["ед"],
+            "изменение": row["изменение"], "остаток": round(t, 4)}
+
+
+def wh_item(me: dict, body: dict) -> dict:
+    """Позиция каталога: создать (ед. задаётся один раз) или поменять минимальный остаток и комментарий."""
+    item, is_new, _ = _wh_target(body)
+    if "мин" in body:
+        item["мин"] = max(0.0, _num(body.get("мин")))
+    if "комментарий" in body:
+        item["комментарий"] = _s(body.get("комментарий"))
+    rows = [r for r in _rows(WH_ITEMS) if _wh_key(r.get("материал"), r.get("цвет")) != _wh_key(item["материал"], item["цвет"])]
+    rows.append(_wh_item_row(item))
+    rows.sort(key=lambda r: (_s(r.get("материал")).lower(), _s(r.get("цвет")).lower()))
+    store.write_sheets([(WH_ITEMS[0], WH_ITEMS[1], rows)])
+    return {"материал": item["материал"], "цвет": item["цвет"], "ед": item["ед"], "новая": is_new}
+
+
+def wh_cut_moves(model: str, parts: list[tuple], who: str, now: str, party: str, nastil: str,
+                 note: str, existing: list[dict] | None = None):
+    """Движения склада по крою. parts — [(цвет, размер, штук)]: штук > 0 списать, < 0 вернуть
+    (исправление технолога). Сырьё считается по норме именно этого размера. Возвращает
+    (новые движения, новые позиции каталога, предупреждения) — вызывающий пишет их вместе с кроем."""
+    bom, cat = boms(), wh_items()
+    moves = list(_rows(WH_MOVES) if existing is None else existing)
+    added: list[dict] = []
+    created: list[dict] = []
+    notes: list[str] = []
+    for sign in (-1, 1):  # −1 списание, +1 возврат
+        card = [{"модель": model, "цвет": c, "размер": sz, "итог": abs(q)}
+                for c, sz, q in parts if (q > 0 if sign < 0 else q < 0)]
+        if not card:
+            continue
+        need, missing = supply_need(card, bom)
+        for m in missing:
+            notes.append(f"{m}: нет нормы расхода — со склада не списано")
+        total: dict[tuple, list] = {}  # одна позиция склада — одна строка журнала на крой
+        for n in need:
+            it = wh_find(cat, n["материал"], n["цвет"])
+            if it is None:  # материала нет на складе: заводим позицию, остаток уйдёт в минус — это видно
+                it = {"материал": n["материал"], "цвет": n["цвет"], "ед": _stock_unit(n["ед"]),
+                      "мин": 0.0, "комментарий": "заведено автоматически при крое"}
+                cat[_wh_key(it["материал"], it["цвет"])] = it
+                created.append(it)
+            q = _convert(n["нужно"], n["ед"], it["ед"])
+            if q is None:
+                notes.append(f"{n['материал']} ({n['цвет'] or 'без цвета'}): на складе учёт в «{it['ед']}», "
+                             f"в справочнике товара в «{n['ед']}» — не списано")
+                continue
+            k = _wh_key(it["материал"], it["цвет"])
+            total.setdefault(k, [it, 0.0])[1] += q
+        for it, q in total.values():
+            added.append(_wh_move(moves + added, "расход" if sign < 0 else "возврат", it,
+                                  -q if sign < 0 else q, who, now, party=party, nastil=nastil, note=note))
+    return added, created, notes
+
+
+def _wh_writes(existing: list[dict], added: list[dict], created: list[dict]) -> list[tuple]:
+    out = []
+    if added:
+        out.append((WH_MOVES[0], WH_MOVES[1], existing + added))
+    if created:
+        out.append((WH_ITEMS[0], WH_ITEMS[1], _rows(WH_ITEMS) + [_wh_item_row(i) for i in created]))
+    return out
+
+
+def _wh_report(added: list[dict], notes: list[str]) -> dict:
+    return {"списано": [{"материал": a["материал"], "цвет": a["цвет"], "ед": a["ед."], "количество": abs(a["изменение"])}
+                        for a in added if a["тип"] == "расход"],
+            "предупреждения": notes}
 
 
 # ------------------------------------------------------------- крой (модуль 3)
@@ -1119,11 +1402,18 @@ def save_card(me: dict, body: dict) -> dict:
     for r in party_rows:
         if _s(r.get("№ партии")) == num:
             r["статус"] = new_status
+    # склад «съедает» сырьё сам: норма этого размера (с запасом) × раскроено
+    wh_old = _rows(WH_MOVES)
+    parts = [(c, sz, q) for items in sections for (c, sz), q in items]
+    wh_add, wh_new, wh_notes = wh_cut_moves(party["модель"], parts, who, now, num,
+                                            f"{first}–{last}" if last > first else str(first),
+                                            f"карта {card_no}", wh_old)
     store.write_sheets([(CUT[0], CUT[1], cut_rows), (CARDS[0], CARDS[1], cards),
                         (ROLLS[0], ROLLS[1], roll_rows), (OUT[0], OUT[1], issue_rows),
-                        (PARTIES[0], PARTIES[1], party_rows)])
+                        (PARTIES[0], PARTIES[1], party_rows)] + _wh_writes(wh_old, wh_add, wh_new))
     return {"карта": card_no, "настилы": f"{num}/{first}" + (f"–{last}" if last > first else ""),
-            "штук": total, "сумма": round(total * rate, 2), "статус": new_status, "готово": done}
+            "штук": total, "сумма": round(total * rate, 2), "статус": new_status, "готово": done,
+            "склад": _wh_report(wh_add, wh_notes)}
 
 
 def cards_of(num: str) -> list[dict]:
@@ -1210,12 +1500,15 @@ def save_cut(me: dict, body: dict) -> dict:
         if _s(r.get("№ партии")) == num:
             r["статус"] = new_status
 
+    wh_old = _rows(WH_MOVES)
+    wh_add, wh_new, wh_notes = wh_cut_moves(party["модель"], [(r["цвет"], r["размер"], q) for r, q in prepared],
+                                            who, now, num, str(настил), "крой", wh_old)
     store.write_sheets([(CUT[0], CUT[1], cut_rows),
                         (OUT[0], OUT[1], issue_rows),
-                        (PARTIES[0], PARTIES[1], party_rows)])
+                        (PARTIES[0], PARTIES[1], party_rows)] + _wh_writes(wh_old, wh_add, wh_new))
     return {"настил": f"{num}/{настил}", "штук": total,
             "сумма": round(total * rate, 2), "ставка": rate,
-            "статус": new_status, "готово": done}
+            "статус": new_status, "готово": done, "склад": _wh_report(wh_add, wh_notes)}
 
 
 # ------------------------------------------------------------ швеи (модуль 4)
@@ -2544,8 +2837,19 @@ def fix_cut(me: dict, body: dict) -> dict:
         r["факт шт"] = val
         note = f"исправил {who} {now}: было {old}"
         r["комментарий"] = (_s(r.get("комментарий")) + "; " if _s(r.get("комментарий")) else "") + note
-    store.write_sheets([(CUT[0], CUT[1], rows)])
-    return {"изменено": len(changes)}
+    # склад: разница по сырью — докинуть расход или вернуть излишек (только если этот крой уже списывался)
+    wh_old = _rows(WH_MOVES)
+    wh_add, wh_new, wh_notes = [], [], []
+    if any(_s(m.get("партия")) == num and _s(m.get("тип")) == "расход" for m in wh_old):
+        for r, old, val in changes:
+            a, c, n = wh_cut_moves(party["модель"], [(_s(r.get("цвет")), _norm_size(r.get("размер")), val - old)],
+                                   who, now, num, _s(r.get("настил")), f"исправление кроя: было {old}, стало {val}",
+                                   wh_old + wh_add)
+            wh_add += a
+            wh_new += c
+            wh_notes += n
+    store.write_sheets([(CUT[0], CUT[1], rows)] + _wh_writes(wh_old, wh_add, wh_new))
+    return {"изменено": len(changes), "склад": {"движений": len(wh_add), "предупреждения": wh_notes}}
 
 
 def save_assign(me: dict, body: dict) -> dict:
@@ -3674,7 +3978,8 @@ def _dispatch(ctx) -> None:
         _ok(ctx, result)
         return
 
-    flow_get = {"/api/cex/design": "cex.design", "/api/cex/supply": "cex.supply"}
+    flow_get = {"/api/cex/design": "cex.design", "/api/cex/supply": "cex.supply",
+                "/api/cex/stock": "cex.supply"}
     if path in flow_get and method == "GET":
         if not _can(me, flow_get[path]):
             _deny(ctx, flow_get[path])
@@ -3686,6 +3991,8 @@ def _dispatch(ctx) -> None:
             for o in q:
                 o["карта"] = card_of(o, cards)
             _ok(ctx, {"очередь": q, "история": card_history(o["номер"] for o in q)})
+        elif path == "/api/cex/stock":
+            _ok(ctx, wh_state())
         else:
             _ok(ctx, supply_state())
         return
@@ -3693,7 +4000,10 @@ def _dispatch(ctx) -> None:
     flow_post = {"/api/cex/design": ("cex.design", save_design),
                  "/api/cex/supply": ("cex.supply", save_supply),
                  "/api/cex/supply/bom": ("cex.supply", save_bom),
-                 "/api/cex/supply/roll": ("cex.supply", add_roll)}
+                 "/api/cex/supply/roll": ("cex.supply", add_roll),
+                 "/api/cex/stock/receive": ("cex.supply", wh_receive),
+                 "/api/cex/stock/adjust": ("cex.supply", wh_adjust),
+                 "/api/cex/stock/item": ("cex.supply", wh_item)}
     if path in flow_post and method == "POST":
         code, fn = flow_post[path]
         if not _can(me, code):

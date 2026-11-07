@@ -516,3 +516,11 @@ select.input {
 .cx-sizetable input.input:not(.cx-mini) { min-width: 150px; }
 .cx-sizetable td:first-child input.input { min-width: 190px; }
 #fl-new-size { min-width: 130px; }
+
+/* склад сырья */
+.cx-neg { color: #b3261e; font-weight: 600; }
+.cx-pos { color: #15803d; font-weight: 600; }
+.cx-low { color: #b45309; font-weight: 600; }
+.fl-pick { cursor: pointer; }
+.fl-pick:hover td { background: rgba(0, 113, 227, .06); }
+.cx-toast { max-width: min(680px, 92vw); text-align: center; line-height: 1.4; }

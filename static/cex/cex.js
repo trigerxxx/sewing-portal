@@ -32,13 +32,13 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const nf = (v) => Number(v || 0).toLocaleString('ru-RU');
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-function toast(message, kind = '') {
+function toast(message, kind = '', ms = 3200) {
   const box = $('#cx-toast');
   box.textContent = message;
   box.className = 'cx-toast ' + kind;
   box.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { box.hidden = true; }, 3200);
+  toast._t = setTimeout(() => { box.hidden = true; }, ms);
 }
 
 async function api(path, opts = {}) {
@@ -73,7 +73,7 @@ async function boot() {
   const want = new URLSearchParams(location.search).get('view');
   const allowed = {
     new: ST.права.создать, tech: ST.права.принимать, cut: ST.права.кроить,
-    design: ST.права.карта, supply: ST.права.снабжение,
+    design: ST.права.карта, supply: ST.права.снабжение, ref: ST.права.снабжение, stock: ST.права.снабжение,
     work: ST.права.работать, pack: ST.права.упаковывать,
     payroll: ST.права.зарплата || ST.права.работать, sum: ST.права.зарплата,
     route: ST.права.маршрут, route_ord: ST.права.маршрут, route_fin: ST.права.маршрут, assign: ST.права.принимать,
@@ -94,7 +94,8 @@ async function boot() {
   }
   if (ST.view === 'tech') await loadTech();
   if (ST.view === 'design') await loadDesign();
-  if (ST.view === 'supply') await loadSupply();
+  if (ST.view === 'supply' || ST.view === 'ref') await loadSupply();
+  if (ST.view === 'stock') await loadStock();
   if (ST.view === 'cut') await loadCut();
   if (ST.view === 'work') await loadWork();
   if (ST.view === 'pack') await loadPack();
@@ -169,7 +170,7 @@ const AS_ROLES = {
   admin: { label: 'Начальник', tabs: null },
   manager: { label: 'Менеджер', tabs: ['new', 'list', 'tech', 'payroll', 'sum', 'staff'] },
   designer: { label: 'Конструктор', tabs: ['design', 'list'] },
-  supply: { label: 'Снабженец', tabs: ['supply', 'list'] },
+  supply: { label: 'Снабженец', tabs: ['supply', 'ref', 'stock', 'list'] },
   storekeeper: { label: 'Складчик', tabs: ['new', 'list'] },
   technologist: { label: 'Технолог', tabs: ['tech', 'assign', 'route_ord', 'route', 'route_fin', 'work', 'list', 'staff'] },
   cutter: { label: 'Закройщик', tabs: ['cut'] },
@@ -216,7 +217,8 @@ async function loadView(v) {
   try {
     if (v === 'tech') await loadTech();
     if (v === 'design') await loadDesign();
-    if (v === 'supply') await loadSupply();
+    if (v === 'supply' || v === 'ref') await loadSupply();
+    if (v === 'stock') await loadStock();
     if (v === 'cut') await loadCut();
     if (v === 'work') await loadWork();
     if (v === 'pack') await loadPack();
@@ -265,13 +267,13 @@ function render() {
 
   const topTitle = $('#cx-top-title') || document.querySelector('.cx-top-title');
   if (topTitle) {
-    topTitle.textContent = ({ work: 'Работа', cut: 'Крой', tech: 'Приёмка', design: 'Конструктор', supply: 'Снабжение',
+    topTitle.textContent = ({ work: 'Работа', cut: 'Крой', tech: 'Приёмка', design: 'Конструктор', supply: 'Снабжение', ref: 'Справочник товара', stock: 'Склад сырья',
       pack: 'Упаковка', payroll: 'Зарплата', sum: 'Сводка', route: 'Швейный маршрут', route_ord: 'Маршрут заказа', route_fin: 'Маршрут ГП', assign: 'Распределение',
       staff: 'Сотрудники и роли' })[ST.view] || 'Заказ на пошив';
   }
   const insideParty = ST.view === 'cut' && ST.cut.партия;
   const insideParty2 = ST.view === 'pack' && ST.pack.партия;
-  const ownHeader = insideParty || insideParty2 || ['work', 'cut', 'tech', 'design', 'supply', 'pack', 'payroll', 'sum', 'route', 'route_ord', 'route_fin', 'assign', 'staff'].includes(ST.view);
+  const ownHeader = insideParty || insideParty2 || ['work', 'cut', 'tech', 'design', 'supply', 'ref', 'stock', 'pack', 'payroll', 'sum', 'route', 'route_ord', 'route_fin', 'assign', 'staff'].includes(ST.view);
   main.innerHTML = `
     ${ownHeader ? '' : `<div class="cx-hero">
       <div>
@@ -310,6 +312,8 @@ function viewHtml() {
   if (ST.view === 'tech') return techHtml();
   if (ST.view === 'design') return designHtml();
   if (ST.view === 'supply') return supplyHtml();
+  if (ST.view === 'ref') return refHtml();
+  if (ST.view === 'stock') return stockHtml();
   if (ST.view === 'cut') return cutCardHtml();
   if (ST.view === 'work') return workHtml();
   if (ST.view === 'pack') return packHtml();
@@ -640,7 +644,10 @@ function tabsHtml(totalOrders) {
   if (ST.права.создать) tabs.push(['new', 'Новый заказ']);
   const inStatus = (s) => ST.заказы.filter((o) => o.статус === s).length;
   if (ST.права.карта) { const n = inStatus('у конструктора'); tabs.push(['design', 'Конструктор' + (n ? ' ' + n : '')]); }
-  if (ST.права.снабжение) { const n = inStatus('у снабженца'); tabs.push(['supply', 'Снабжение' + (n ? ' ' + n : '')]); }
+  if (ST.права.снабжение) {
+    const n = inStatus('у снабженца');
+    tabs.push(['supply', 'Снабжение' + (n ? ' ' + n : '')], ['ref', 'Справочник товара'], ['stock', 'Склад сырья']);
+  }
   if (ST.права.принимать) {
     const n = (ST.tech.очередь || []).length;
     tabs.push(['tech', 'Приёмка' + (n ? ' ' + n : '')]);
@@ -1062,7 +1069,7 @@ async function saveCut() {
     closeModal();
     await loadCut();
     render();
-    toast(`Настил ${res.настил}: ${nf(res.штук)} шт · ${nf(res.сумма)} сом`, 'ok');
+    flStockToast(`Настил ${res.настил}: ${nf(res.штук)} шт · ${nf(res.сумма)} сом`, res.склад);
   } catch (err) {
     toast(err.message, 'err');
   }
@@ -1851,9 +1858,12 @@ document.addEventListener('click', async (ev) => {
     if (ST.view === 'tech') {
       try { await loadTech(); } catch (err) { toast(err.message, 'err'); }
     }
-    if (ST.view === 'design' || ST.view === 'supply') {
+    if (ST.view === 'design' || ST.view === 'supply' || ST.view === 'ref') {
       FL.num = '';  // у конструктора и снабженца свой открытый заказ
       try { await (ST.view === 'design' ? loadDesign() : loadSupply()); } catch (err) { toast(err.message, 'err'); }
+    }
+    if (ST.view === 'stock') {
+      try { await loadStock(); } catch (err) { toast(err.message, 'err'); }
     }
     if (ST.view === 'cut') {
       try { await loadCut(); } catch (err) { toast(err.message, 'err'); }
@@ -1936,7 +1946,8 @@ document.addEventListener('click', async (ev) => {
       if (ST.view === 'cut') await loadCut();
       if (ST.view === 'tech') await loadTech();
       if (ST.view === 'design') await loadDesign();
-      if (ST.view === 'supply') await loadSupply();
+      if (ST.view === 'supply' || ST.view === 'ref') await loadSupply();
+      if (ST.view === 'stock') await loadStock();
       render();
       toast('Обновлено из Excel', 'ok');
     } catch (err) { toast(err.message, 'err'); }
