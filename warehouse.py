@@ -73,6 +73,9 @@ def source_path() -> Path:
         raw = SOURCE_HINT.read_text(encoding="utf-8").strip()
         if raw:
             return Path(raw).expanduser()
+    if not DEFAULT_SOURCE.is_file():  # не на компьютере заказчика: та же рабочая копия книги, что у цеха
+        import cex_store
+        return cex_store.source_path()
     return DEFAULT_SOURCE
 
 
