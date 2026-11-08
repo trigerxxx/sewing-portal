@@ -2,6 +2,14 @@
   "name": "sewing-portal",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "postCreateCommand": "pip install -r requirements.txt",
-  "forwardPorts": [8787],
-  "portsAttributes": { "8787": { "label": "Портал цеха", "onAutoForward": "openBrowser" } }
+  "forwardPorts": [
+    8787
+  ],
+  "portsAttributes": {
+    "8787": {
+      "label": "Портал цеха",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postStartCommand": "bash run.sh"
 }
