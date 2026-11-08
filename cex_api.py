@@ -1017,6 +1017,7 @@ def wh_state() -> dict:
         rows.append({"материал": it["материал"], "цвет": it["цвет"], "ед": it["ед"], "остаток": have,
                      "резерв": held, "свободно": round(have - held, 4), "мин": it["мин"],
                      "мало": bool(it["мин"] and have < it["мин"]), "минус": have < 0,
+                     "не_хватает": have >= 0 and held - have > 1e-9,
                      "комментарий": it["комментарий"]})
     rows.sort(key=lambda x: (x["материал"].lower(), x["цвет"].lower()))
     journal = [{"id": _int(r.get("id")), "дата": _s(r.get("дата")), "тип": _s(r.get("тип")),
@@ -1116,6 +1117,84 @@ def wh_item(me: dict, body: dict) -> dict:
     rows.sort(key=lambda r: (_s(r.get("материал")).lower(), _s(r.get("цвет")).lower()))
     store.write_sheets([(WH_ITEMS[0], WH_ITEMS[1], rows)])
     return {"материал": item["материал"], "цвет": item["цвет"], "ед": item["ед"], "новая": is_new}
+
+
+def _parse_qty(raw) -> float | None:
+    text = _s(raw).replace("\xa0", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def wh_import(me: dict, body: dict) -> dict:
+    """Остатки списком (из Excel): «материал; цвет; количество; ед.; мин. остаток».
+
+    Это «остаток по факту» для каждой строки: повторная загрузка того же списка ничего не меняет.
+    Всё или ничего: пока в списке есть ошибка, на складе не меняется ни одна строка."""
+    lines = [ln for ln in str(body.get("текст") or "").splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("Вставьте список: материал; цвет; количество; ед.; мин. остаток")
+    if len(lines) > 500:
+        raise ValueError("В одной загрузке не больше 500 строк")
+    items = wh_items()
+    moves = _rows(WH_MOVES)
+    bal = wh_balances(moves)
+    item_rows = {_wh_key(r.get("материал"), r.get("цвет")): r for r in _rows(WH_ITEMS)}
+    who = _s(me.get("фио")) or _s(me.get("логин"))
+    now = _now()
+    errors, plan, seen = [], [], set()
+    for n, line in enumerate(lines, start=1):
+        sep = "\t" if "\t" in line else ";" if ";" in line else "|"
+        f = [c.strip() for c in line.split(sep)]
+        if n == 1 and f[0].lower().startswith("матер") and (len(f) < 3 or _parse_qty(f[2]) is None):
+            continue  # строка заголовков из Excel
+        if len(f) < 3:
+            errors.append(f"строка {n}: нужно «материал; цвет; количество; ед.; мин. остаток», а здесь {len(f)} полей")
+            continue
+        mat, color, qty = f[0], f[1], _parse_qty(f[2])
+        unit_in, min_raw = (f[3] if len(f) > 3 else ""), (f[4] if len(f) > 4 else "")
+        if not mat:
+            errors.append(f"строка {n}: не указан материал")
+        elif qty is None or qty < 0:
+            errors.append(f"строка {n} ({mat}): количество «{f[2]}» — нужно число, не меньше нуля")
+        elif min_raw and (_parse_qty(min_raw) is None or _parse_qty(min_raw) < 0):
+            errors.append(f"строка {n} ({mat}): мин. остаток «{min_raw}» — нужно число, не меньше нуля")
+        elif _wh_key(mat, color) in seen:
+            errors.append(f"строка {n} ({mat}{' ' + color if color else ''}): эта позиция уже есть выше в списке")
+        else:
+            seen.add(_wh_key(mat, color))
+            found = items.get(_wh_key(mat, color))
+            item = found or {"материал": mat, "цвет": color, "ед": _stock_unit(unit_in or "кг"), "мин": 0.0,
+                             "комментарий": ""}
+            t = _convert(qty, unit_in or item["ед"], item["ед"])
+            if t is None:
+                errors.append(f"строка {n} ({mat}): на складе учёт в «{item['ед']}», а в списке «{unit_in}» — единицы не сходятся")
+                continue
+            plan.append((item, found is None, t, _parse_qty(min_raw) if min_raw else None))
+    if errors:
+        more = f" (и ещё {len(errors) - 10})" if len(errors) > 10 else ""
+        raise ValueError("Склад не изменён. Исправьте: " + "; ".join(errors[:10]) + more)
+    added, new_count, same = [], 0, 0
+    for item, is_new, target, min_stock in plan:
+        key = _wh_key(item["материал"], item["цвет"])
+        cur = bal.get(key, 0.0)
+        moved = abs(target - cur) > 1e-9
+        if not (is_new or moved or (min_stock is not None and min_stock != item["мин"])):
+            same += 1
+            continue
+        new_count += is_new
+        if min_stock is not None:
+            item["мин"] = min_stock
+        item_rows[key] = _wh_item_row(item)
+        if moved:
+            added.append(_wh_move(moves + added, "корректировка", item, target - cur, who, now,
+                                  note=f"остатки списком; было {cur:g}, стало {target:g}"))
+    if same < len(plan):
+        rows = sorted(item_rows.values(), key=lambda r: (_s(r.get("материал")).lower(), _s(r.get("цвет")).lower()))
+        store.write_sheets([(WH_MOVES[0], WH_MOVES[1], moves + added), (WH_ITEMS[0], WH_ITEMS[1], rows)])
+    return {"строк": len(plan), "новых": new_count, "изменено": len(plan) - same - new_count,
+            "без_изменений": same, "движений": len(added)}
 
 
 def wh_cut_moves(model: str, parts: list[tuple], who: str, now: str, party: str, nastil: str,
@@ -4003,7 +4082,8 @@ def _dispatch(ctx) -> None:
                  "/api/cex/supply/roll": ("cex.supply", add_roll),
                  "/api/cex/stock/receive": ("cex.supply", wh_receive),
                  "/api/cex/stock/adjust": ("cex.supply", wh_adjust),
-                 "/api/cex/stock/item": ("cex.supply", wh_item)}
+                 "/api/cex/stock/item": ("cex.supply", wh_item),
+                 "/api/cex/stock/import": ("cex.supply", wh_import)}
     if path in flow_post and method == "POST":
         code, fn = flow_post[path]
         if not _can(me, code):

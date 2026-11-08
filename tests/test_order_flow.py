@@ -440,6 +440,56 @@ class WarehouseTests(unittest.TestCase):
         self.assertEqual(res["склад"]["движений"], 0)
         self.assertEqual(self.have("Футер", "бежевый")["остаток"], 100.0)
 
+    # ---- загрузка остатков списком
+    def test_import_loads_stock_and_min(self):
+        res = cex_api.wh_import(ME, {"текст": "материал;цвет;количество;ед.;мин\n"
+                                              "Футер;бежевый;120;кг;20\n"
+                                              "Резинка;чёрный;300;м;\n"
+                                              "Нитки;;4 000;г;1"})
+        self.assertEqual((res["строк"], res["новых"], res["без_изменений"]), (3, 3, 0))
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 120.0)
+        self.assertEqual(self.have("Нитки", "")["остаток"], 4.0)  # граммы пересчитаны в кг
+        self.assertEqual(self.have("Футер", "бежевый")["мин"], 20.0)
+
+    def test_import_twice_changes_nothing(self):
+        text = "Футер;бежевый;120;кг;20\nРезинка;чёрный;300;м"
+        cex_api.wh_import(ME, {"текст": text})
+        n = len(self.st.sheets[cex_api.WH_MOVES[0]])
+        res = cex_api.wh_import(ME, {"текст": text})
+        self.assertEqual((res["без_изменений"], res["движений"]), (2, 0))
+        self.assertEqual(len(self.st.sheets[cex_api.WH_MOVES[0]]), n)
+
+    def test_import_is_a_fact_not_an_addition(self):
+        cex_api.wh_receive(ME, {"материал": "Футер", "цвет": "бежевый", "количество": 100, "ед": "кг"})
+        res = cex_api.wh_import(ME, {"текст": "Футер\tбежевый\t80\tкг"})  # вставка из Excel — табуляция
+        self.assertEqual((res["изменено"], res["новых"]), (1, 0))
+        self.assertEqual(self.have("Футер", "бежевый")["остаток"], 80.0)
+
+    def test_import_all_or_nothing(self):
+        with self.assertRaises(ValueError) as cm:
+            cex_api.wh_import(ME, {"текст": "Футер;бежевый;120;кг\nНитки;;много;кг\nФутер;бежевый;5;кг\nМолния;1"})
+        msg = str(cm.exception)
+        self.assertIn("Склад не изменён", msg)
+        self.assertIn("строка 2", msg)
+        self.assertIn("строка 3", msg)
+        self.assertIn("строка 4", msg)
+        self.assertEqual(cex_api.wh_state()["позиции"], [])
+
+    def test_import_refuses_mismatched_units(self):
+        cex_api.wh_receive(ME, {"материал": "Резинка", "цвет": "чёрный", "количество": 10, "ед": "м"})
+        with self.assertRaises(ValueError):
+            cex_api.wh_import(ME, {"текст": "Резинка;чёрный;5;кг"})
+        self.assertEqual(self.have("Резинка", "чёрный")["остаток"], 10.0)
+
+    def test_state_flags_shortage_under_reserve(self):
+        self.stock_up()
+        cex_api.wh_import(ME, {"текст": "Футер;бежевый;1;кг"})  # на складе меньше, чем нужно партиям
+        self.accept()
+        pos = self.have("Футер", "бежевый")
+        self.assertTrue(pos["не_хватает"])
+        self.assertFalse(pos["минус"])
+        self.assertFalse(self.have("Футер", "светло-серый")["не_хватает"])
+
 
 if __name__ == "__main__":
     unittest.main()

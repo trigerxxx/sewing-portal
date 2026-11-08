@@ -5,7 +5,7 @@
 const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, размеры: {}, рулоны: [], статусы: [] },
   num: '', rows: [], bomModel: '', bomRows: [], bomSizes: [], supplyTab: 'orders',
   stock: { позиции: [], движения: [], единицы: ['кг', 'г', 'м', 'шт', 'бобина'] },
-  stockForm: { материал: '', цвет: '', количество: '', ед: 'кг', комментарий: '' } };
+  stockForm: { материал: '', цвет: '', количество: '', ед: 'кг', комментарий: '' }, stockBulk: '' };
 
 /* ---- расход сырья: общие функции для снабжения, технолога и закройщика ----
    Нормы задаются по размерам: у каждого размера свой расход на 1 шт. Пустая ячейка размера
@@ -401,7 +401,7 @@ function stockHtml() {
       <td class="num ${x.минус ? 'cx-neg' : ''}"><b>${flStockQty(x.остаток, x.ед)}</b></td>
       <td class="num">${x.резерв ? flStockQty(x.резерв, x.ед) : '<span class="cx-hint">—</span>'}</td>
       <td class="num ${x.свободно < 0 ? 'cx-neg' : ''}">${flStockQty(x.свободно, x.ед)}</td>
-      <td>${x.минус ? '<span class="cx-neg">в минусе</span>' : x.мало ? '<span class="cx-low">ниже минимума</span>' : '<span class="cx-hint">норма</span>'}</td></tr>`).join('');
+      <td>${x.минус ? '<span class="cx-neg">в минусе</span>' : x.не_хватает ? '<span class="cx-neg">не хватает под партии</span>' : x.мало ? '<span class="cx-low">ниже минимума</span>' : '<span class="cx-hint">норма</span>'}</td></tr>`).join('');
   const names = [...new Set([...(S.позиции || []).map((x) => x.материал), ...flMaterialNames()])];
   const jr = (S.движения || []).slice(0, 80).map((m) => `<tr>
       <td>${esc(m.дата)}</td><td>${esc(m.тип)}</td><td>${esc(m.материал)}${m.цвет ? ` · ${esc(m.цвет)}` : ''}</td>
@@ -430,6 +430,12 @@ function stockHtml() {
           <button class="btn" data-act="fl-stock-adjust">Остаток по факту = это количество</button>
         </div>
         <div class="cx-hint" style="margin-top:8px">Вес можно вносить в граммах или килограммах — склад ведёт килограммы. Рулон, внесённый во вкладке «Снабжение → Рулоны», приходует вес сам. Цвет не указывайте у материала, который не делят по цветам (молния, нитки): тогда он подойдёт ко всем цветам. Нажмите строку таблицы, чтобы подставить позицию.</div>
+      </div></div>
+    <div class="cx-card" style="margin-top:14px"><div class="cx-card-h"><h3>Загрузить остатки списком</h3><span class="cx-hint">для первого запуска: вставьте таблицу из Excel</span></div>
+      <div class="cx-card-b">
+        <textarea class="input" data-fl-bulk rows="6" style="width:100%;font-family:monospace" placeholder="материал; цвет; количество; ед.; мин. остаток&#10;Футер двунитка; бежевый; 120; кг; 20&#10;Резинка; чёрный; 300; м&#10;Нитки; ; 4000; г; 1">${esc(FL.stockBulk)}</textarea>
+        <div class="cx-btn-row" style="margin-top:12px"><button class="btn primary" data-act="fl-stock-import">Загрузить остатки</button></div>
+        <div class="cx-hint" style="margin-top:8px">Каждая строка: материал, цвет, количество, ед., мин. остаток (последние два можно не писать). Разделитель — табуляция (копирование из Excel) или «;». Это остаток по факту: повторная загрузка того же списка ничего не меняет. Если в списке есть ошибка, склад не меняется совсем, и вы увидите, в какой строке.</div>
       </div></div>
     <div class="cx-card" style="margin-top:14px"><div class="cx-card-h"><h3>Журнал движений</h3><span class="cx-hint">последние ${nf((S.движения || []).slice(0, 80).length)}</span></div>
       <div class="cx-card-b"><div class="cx-scroll"><table class="cx-table">
@@ -551,6 +557,18 @@ document.addEventListener('click', async (ev) => {
     el.disabled = false;
     return;
   }
+  if (act === 'fl-stock-import') {
+    el.disabled = true;
+    try {
+      const r = await api(`${API}/stock/import`, { method: 'POST', body: JSON.stringify({ текст: FL.stockBulk }) });
+      await loadStock();
+      FL.stockBulk = '';
+      render();
+      toast(`Загружено строк: ${r.строк}. Новых позиций ${r.новых}, изменено ${r.изменено}, без изменений ${r.без_изменений}`, 'ok', 6000);
+    } catch (err) { toast(err.message, 'err', 12000); }
+    el.disabled = false;
+    return;
+  }
   if (act === 'fl-roll-add') {
     const body = {};
     FL_ROLL_FIELDS.forEach((f) => { body[f] = ($(`#fl-r-${f}`) || {}).value || ''; });
@@ -571,6 +589,7 @@ document.addEventListener('input', (ev) => {
   }
   if (t.dataset.flMat) pick('flMat', FL.rows);
   if (t.dataset.flSf) FL.stockForm[t.dataset.flSf] = t.value;
+  if (t.dataset.flBulk !== undefined) FL.stockBulk = t.value;
   if (t.dataset.flBom || t.dataset.flBsz) {
     if (t.dataset.flBom) pick('flBom', FL.bomRows);
     else {
