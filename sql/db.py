@@ -17,6 +17,9 @@ BASE = Path(__file__).resolve().parent.parent
 SQL_DIR = BASE / "data" / "sql"
 DB_PATH = Path(os.environ.get("V2_DB", SQL_DIR / "portal.db"))
 BACKUP_DIR = SQL_DIR / "backups"
+# Эталон базы лежит в репозитории (workbook/portal.db). Новая установка берёт копию,
+# пока своей базы нет: так вкладки WB, склад и магазин сразу показывают данные.
+TEMPLATE = BASE / "workbook" / "portal.db"
 MASTER = BASE / "master" / "цех_склад_master_2026-10-21.xlsm"
 CONFIG = BASE / "config.json"
 
@@ -163,9 +166,22 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
 ]
 
 
+def _seed_from_template(target: Path) -> None:
+    """Пустую (нет файла или нет таблиц) базу по умолчанию заменяем копией эталона."""
+    if "V2_DB" in os.environ or not TEMPLATE.is_file():
+        return
+    if target.exists() and target.stat().st_size > 8192:
+        return
+    for ext in ("", "-wal", "-shm"):
+        Path(str(target) + ext).unlink(missing_ok=True)
+    shutil.copy2(TEMPLATE, target)
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     target = Path(path) if path else DB_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
+    if path is None:
+        _seed_from_template(target)
     con = sqlite3.connect(str(target), timeout=10, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
