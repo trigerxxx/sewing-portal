@@ -2114,6 +2114,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "data": warehouse.orders()})
             return
 
+        if path == "/api/orders/all" and method == "GET":
+            if not can(me, "orders.view") and not can(me, "wh.view"):
+                self._err("нет доступа к заказам", 403)
+                return
+            try:
+                import shop_orders
+                type_ = query.get("тип", [""])[0] or None
+                if type_ and type_ not in ("shop", "fbs"):
+                    self._err("тип: shop или fbs")
+                    return
+                self._json({"ok": True, **shop_orders.list_orders(type_, query.get("статус", [""])[0] or None)})
+            except Exception as exc:  # noqa: BLE001
+                self._err(f"заказы: {exc}", 500)
+            return
+
+        if path == "/api/orders/history" and method == "GET":
+            if not can(me, "orders.view") and not can(me, "wh.view"):
+                self._err("нет доступа к заказам", 403)
+                return
+            import shop_orders
+            self._json({"ok": True, "data": shop_orders.history(query.get("id", [""])[0])})
+            return
+
         if path == "/api/orders/pick" and method == "POST":
             if not can(me, "orders.view"):
                 self._err("нет прав", 403)
@@ -2360,6 +2383,12 @@ def main():
             warehouse.flush_pending()
         except Exception as exc:  # noqa: BLE001
             print("склад не прогрет:", exc)
+        try:
+            import shop_orders
+            st = shop_orders.mirror()
+            print(f"заказы магазина в SQL: {st['заказов']} (новых {st['создано']}, обновлено {st['обновлено']})")
+        except Exception as exc:  # noqa: BLE001
+            print("заказы магазина не отражены в SQL:", exc)
 
     threading.Thread(target=_boot_sync, daemon=True).start()
     try:

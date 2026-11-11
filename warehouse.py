@@ -247,6 +247,23 @@ def _save_ledger(data: dict) -> None:
     except OSError:
         _LEDGER_CACHE["mtime"] = None
     _STOCK["key"] = None
+    _mirror_orders_if_changed(data)
+
+
+_ORDERS_SIG = {"sig": None}
+
+
+def _mirror_orders_if_changed(data: dict) -> None:
+    """Заказы магазина изменились → отразить в общей SQL-таблице (в фоне, без ошибок для склада)."""
+    try:
+        sig = hash(json.dumps(data.get("orders", []), ensure_ascii=False, sort_keys=True))
+        if sig == _ORDERS_SIG["sig"]:
+            return
+        _ORDERS_SIG["sig"] = sig
+        import shop_orders
+        shop_orders.schedule()
+    except Exception as exc:  # noqa: BLE001
+        print("заказы магазина: отражение не запланировано:", exc)
 
 
 # ------------------------------------------------------------------ чтение
