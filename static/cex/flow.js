@@ -315,21 +315,21 @@ function buyHtml() {
   const rows = list.map((r) => `<tr>
       <td><b>${esc(r.материал)}</b>${r.на_складе ? '' : '<div class="cx-hint">нет на складе сырья</div>'}</td>
       <td>${r.цвет ? esc(r.цвет) : '<span class="cx-hint">любой</span>'}</td>
+      <td class="num"><b class="${r.не_хватает > 0 ? 'cx-neg' : ''}">${flQty(r.докупить, r.ед)}</b>
+        ${!r.не_хватает && r.мин ? '<div class="cx-hint">до мин. остатка</div>' : ''}</td>
       <td class="num">${r.нужно ? flStockQty(r.нужно, r.ед) : '—'}${r.заказы.length ? `<div class="cx-hint">${flBuyOrders(r)}</div>` : ''}
         ${r.единицы_не_сходятся.length ? `<div class="cx-neg">не сложено — другие единицы: ${r.единицы_не_сходятся.map(esc).join('; ')}</div>` : ''}</td>
       <td class="num">${r.на_складе ? (r.свободно < 0 ? `<span class="cx-neg">${flStockQty(r.свободно, r.ед)}</span><div class="cx-hint">партиям в крое не хватает</div>` : flStockQty(r.свободно, r.ед)) : '—'}</td>
       <td class="num">${r.мин ? flStockQty(r.мин, r.ед) : '—'}</td>
       <td class="num">${r.заказано ? flStockQty(r.заказано, r.ед) : '—'}</td>
-      <td class="num"><b class="${r.не_хватает > 0 ? 'cx-neg' : ''}">${flQty(r.докупить, r.ед)}</b>
-        ${!r.не_хватает && r.мин ? '<div class="cx-hint">до мин. остатка</div>' : ''}</td>
     </tr>`).join('');
   const short = list.filter((r) => r.не_хватает > 0).length;
   return `<div class="cx-card"><div class="cx-card-h"><h3>Что докупить</h3>
       <span class="cx-hint">${short ? `не хватает заказам: <b>${nf(short)}</b> поз.` : 'заказам хватает'} · всего в списке ${nf(list.length)}</span></div>
     <div class="cx-card-b">
       <div class="cx-scroll"><table class="cx-table">
-        <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно заказам</th><th class="num">Свободно на складе</th>
-          <th class="num">Мин. остаток</th><th class="num">Уже заказано</th><th class="num">Докупить</th></tr></thead>
+        <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Докупить</th><th class="num">Нужно заказам</th>
+          <th class="num">Свободно на складе</th><th class="num">Мин. остаток</th><th class="num">Уже заказано</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
       <div class="cx-btn-row" style="margin-top:14px">
         <button class="btn primary" data-act="fl-buy-print">Печать</button>
