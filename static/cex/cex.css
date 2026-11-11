@@ -524,3 +524,22 @@ select.input {
 .fl-pick { cursor: pointer; }
 .fl-pick:hover td { background: rgba(0, 113, 227, .06); }
 .cx-toast { max-width: min(680px, 92vw); text-align: center; line-height: 1.4; }
+
+/* конструктор: карта сеткой «модель · цвет × размер» */
+.fl-gtable .fl-gmeta { display: flex; gap: 6px; min-width: 260px; padding: 6px 8px 6px 12px; }
+.fl-gtable .fl-gmeta .input { min-height: 34px; padding: 6px 10px; font-size: 13px; border-radius: 10px; }
+.fl-gtable .fl-gmeta .input:first-child { flex: 0 0 84px; }
+.fl-gtable td { vertical-align: top; padding-top: 6px; }
+.fl-gtable .fl-gchar { min-width: 200px; }
+.fl-gtable .fl-gchar .input { min-height: 34px; padding: 6px 10px; font-size: 13px; border-radius: 10px; }
+.fl-gtable tfoot th, .fl-gtable tfoot td { border-bottom: 0; color: var(--ink-3); font-size: 12px; padding-top: 8px; }
+.fl-gord { font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; }
+.cx-gin.diff, .cx-gin.diff:not(:placeholder-shown) { border-color: var(--orange); background: var(--orange-soft); }
+.fl-gx { border: 0; background: none; color: var(--ink-3); cursor: pointer; font-size: 10px; padding: 0 0 0 3px; opacity: .55; }
+.fl-gx:hover { opacity: 1; color: var(--red, #d33); }
+@media (max-width: 600px) {
+  .fl-gtable .fl-gmeta { flex-direction: column; min-width: 0; width: 118px; gap: 4px; padding: 6px 6px 6px 8px; }
+  .fl-gtable .fl-gmeta .input:first-child { flex: none; }
+  .fl-gtable thead .cx-gcolor, .fl-gtable tfoot .cx-gcolor { min-width: 0; width: 118px; white-space: normal; padding-left: 8px; }
+  .fl-gtable .fl-gchar { min-width: 160px; }
+}

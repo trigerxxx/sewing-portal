@@ -3,7 +3,7 @@
 /* Модуль «Цех» · поток заказа: конструктор (производственная карта) → снабженец (сырьё) → технолог. */
 
 const FL = { design: { очередь: [], история: {} }, supply: { очередь: [], спецификации: {}, размеры: {}, рулоны: [], статусы: [] },
-  num: '', rows: [], bomModel: '', bomRows: [], bomSizes: [], supplyTab: 'orders',
+  num: '', rows: [], grid: { sizes: [], groups: [] }, bomModel: '', bomRows: [], bomSizes: [], supplyTab: 'orders',
   stock: { позиции: [], движения: [], единицы: ['кг', 'г', 'м', 'шт', 'бобина'] },
   stockForm: { материал: '', цвет: '', количество: '', ед: 'кг', комментарий: '' }, stockBulk: '' };
 
@@ -147,17 +147,102 @@ function designHtml() {
     ${o ? designCardHtml(o) : ''}`;
 }
 
-function designCardHtml(o) {
-  const rows = FL.rows.map((r, i) => `<tr>
-      <td><input class="input" data-fl-row="${i}|модель" value="${esc(r.модель)}" list="fl-models"></td>
-      <td><input class="input" data-fl-row="${i}|цвет" value="${esc(r.цвет)}" list="fl-colors"></td>
-      <td><input class="input cx-mini" data-fl-row="${i}|размер" value="${esc(r.размер)}"></td>
-      <td class="num">${nf(r.заказано)}</td>
-      <td><input class="input cx-mini" type="number" min="0" data-fl-row="${i}|итог" value="${esc(r.итог)}"></td>
-      <td><input class="input" data-fl-row="${i}|характеристики" value="${esc(r.характеристики)}" placeholder="длина, ткань, фурнитура…"></td>
-      <td><button class="btn ghost" data-act="fl-row-del" data-i="${i}" title="Убрать строку">✕</button></td>
+/* ---- карта конструктора сеткой: строка = модель + цвет, колонки = размеры ----
+   На сервер уходит прежний плоский список «модель · цвет · размер · итог». Клетка, которая была в карте
+   и стала пустой, — это 0 шт (строка остаётся в истории); новая пустая клетка в карту не попадает. */
+function flGridFromCard(card) {
+  const sizes = [];
+  const groups = [];
+  const idx = {};
+  (card || []).forEach((r) => {
+    const k = `${r.модель}|${r.цвет}`;
+    let g = idx[k];
+    if (!g) { g = idx[k] = { модель: r.модель, цвет: r.цвет, хар: r.характеристики || '', хар_разные: false, хар_тронуты: false, cells: {} }; groups.push(g); }
+    if ((r.характеристики || '') !== g.хар) g.хар_разные = true;
+    g.cells[r.размер] = { итог: String(r.итог ?? ''), заказано: num(r.заказано), был: true, хар: r.характеристики || '' };
+    if (!sizes.includes(r.размер)) sizes.push(r.размер);
+  });
+  groups.forEach((g) => { if (g.хар_разные) g.хар = ''; });
+  return { sizes: flSizeSort(sizes), groups };
+}
+
+function flGridToRows() {
+  const out = [];
+  FL.grid.groups.forEach((g) => {
+    FL.grid.sizes.forEach((sz) => {
+      const c = g.cells[sz];
+      if (!c) return;
+      const empty = String(c.итог).trim() === '';
+      if (empty && !c.был) return;
+      const хар = g.хар_тронуты || !g.хар_разные ? g.хар : c.хар;
+      out.push({ модель: g.модель, цвет: g.цвет, размер: sz, итог: empty ? 0 : c.итог, характеристики: хар });
+    });
+  });
+  return out;
+}
+
+const flCellQty = (c) => (c ? Math.max(0, Math.round(num(c.итог))) : 0);
+const flSizeLabel = (sz) => (sz === '' ? 'без размера' : esc(sz));
+
+function flGridTotals() {
+  const rows = FL.grid.groups.map((g) => FL.grid.sizes.reduce((s, sz) => s + flCellQty(g.cells[sz]), 0));
+  const cols = FL.grid.sizes.map((sz) => FL.grid.groups.reduce((s, g) => s + flCellQty(g.cells[sz]), 0));
+  return { rows, cols, total: rows.reduce((a, b) => a + b, 0) };
+}
+
+// обновить суммы, не перерисовывая таблицу (иначе курсор уходит из клетки)
+function flGridRefresh() {
+  const t = flGridTotals();
+  t.rows.forEach((v, i) => { const el = document.getElementById(`fl-gsum-${i}`); if (el) el.textContent = v ? nf(v) : ''; });
+  t.cols.forEach((v, i) => { const el = document.getElementById(`fl-gcol-${i}`); if (el) el.textContent = v ? nf(v) : ''; });
+  const tot = document.getElementById('fl-total');
+  if (tot) tot.textContent = nf(t.total);
+  const all = document.getElementById('fl-gall');
+  if (all) all.textContent = nf(t.total);
+}
+
+function designGridHtml() {
+  const { sizes, groups } = FL.grid;
+  const t = flGridTotals();
+  const body = groups.map((g, gi) => `<tr>
+      <th class="cx-gcolor fl-gmeta">
+        <input class="input" data-fl-g="${gi}|модель" value="${esc(g.модель)}" list="fl-models" placeholder="модель" aria-label="Модель">
+        <input class="input" data-fl-g="${gi}|цвет" value="${esc(g.цвет)}" list="fl-colors" placeholder="цвет" aria-label="Цвет">
+      </th>
+      ${sizes.map((sz) => {
+        const c = g.cells[sz];
+        const v = c ? c.итог : '';
+        const ord = c ? c.заказано : 0;
+        const diff = c && c.был && String(v).trim() !== '' && Math.round(num(v)) !== ord;
+        return `<td><input class="cx-gin ${diff ? 'diff' : ''}" type="number" min="0" step="1" inputmode="numeric"
+            data-fl-gc="${gi}|${esc(sz)}" value="${esc(v)}" placeholder="·"
+            aria-label="${esc(g.модель)} ${esc(g.цвет)}, размер ${flSizeLabel(sz)}">
+          ${ord ? `<div class="fl-gord" title="Заказано клиентом">зак. ${nf(ord)}</div>` : ''}</td>`;
+      }).join('')}
+      <td class="cx-gsum" id="fl-gsum-${gi}">${t.rows[gi] ? nf(t.rows[gi]) : ''}</td>
+      <td class="fl-gchar"><input class="input" data-fl-g="${gi}|хар" value="${esc(g.хар)}"
+          placeholder="${g.хар_разные && !g.хар_тронуты ? 'по размерам разные — впишите, чтобы задать всем' : 'длина, ткань, фурнитура…'}"></td>
+      <td><button class="btn ghost" data-act="fl-g-del" data-i="${gi}" title="Убрать модель и цвет">✕</button></td>
     </tr>`).join('');
-  const total = FL.rows.reduce((s, r) => s + num(r.итог), 0);
+  const head = sizes.map((sz, si) => `<th>${flSizeLabel(sz)}
+      <button class="fl-gx" data-act="fl-g-size-del" data-i="${si}" title="Убрать размер ${flSizeLabel(sz)}">✕</button></th>`).join('');
+  const foot = sizes.map((sz, si) => `<td class="cx-gsum" id="fl-gcol-${si}">${t.cols[si] ? nf(t.cols[si]) : ''}</td>`).join('');
+  const suggest = flSizeSort(flAllSizes().filter((s) => !sizes.includes(s)));
+  return `<div class="cx-gwrap"><table class="cx-gtable fl-gtable">
+      <thead><tr><th class="cx-gcolor">Модель · цвет / размер</th>${head}<th>Σ</th><th>Доп. характеристики</th><th></th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr><th class="cx-gcolor">Итого по размерам</th>${foot}<td class="cx-gsum"><b id="fl-gall">${nf(t.total)}</b></td><td></td><td></td></tr></tfoot>
+    </table></div>
+    <div class="cx-btn-row" style="margin-top:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn" data-act="fl-g-add">+ Модель / цвет</button>
+      <input class="input cx-mini" id="fl-g-size" list="fl-g-sizes" placeholder="размер" style="width:140px;max-width:140px">
+      <datalist id="fl-g-sizes">${suggest.map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
+      <button class="btn" data-act="fl-g-size-add">+ Размер</button>
+    </div>`;
+}
+
+function designCardHtml(o) {
+  const total = flGridTotals().total;
   return `<div class="cx-card" style="margin-top:14px">
     <div class="cx-card-h"><h3>Карта заказа №${esc(o.номер)}</h3>
       <span class="cx-hint">в заказе ${nf(o.заказано)} шт · в карте <b id="fl-total">${nf(total)}</b> шт</span></div>
@@ -165,10 +250,8 @@ function designCardHtml(o) {
       ${o.комментарий ? `<div class="cx-notice">${esc(o.комментарий)}</div>` : ''}
       <datalist id="fl-models">${(ST.refs.модели || []).map((m) => `<option value="${esc(m.модель)}">${esc(m.название)}</option>`).join('')}</datalist>
       <datalist id="fl-colors">${(ST.refs.цвета || []).map((c) => `<option value="${esc(c.цвет)}">`).join('')}</datalist>
-      <div class="cx-scroll"><table class="cx-table">
-        <thead><tr><th>Модель</th><th>Цвет</th><th>Размер</th><th class="num">Заказано</th><th>Итог, шт</th><th>Доп. характеристики</th><th></th></tr></thead>
-        <tbody>${rows}</tbody></table></div>
-      <div class="cx-btn-row" style="margin-top:10px"><button class="btn" data-act="fl-row-add">+ Строка</button></div>
+      <div class="cx-hint" style="margin-bottom:8px">Впишите итог в клетку «модель · цвет × размер». Под клеткой — сколько заказал клиент; оранжевая рамка — итог отличается от заказа.</div>
+      ${designGridHtml()}
       <div class="cx-field" style="margin-top:12px"><label>Комментарий к изменению</label>
         <input class="input" id="fl-note" placeholder="Например: по 46 размеру не хватает ткани"></div>
       <div class="cx-btn-row" style="margin-top:14px">
@@ -185,12 +268,15 @@ function flOpenDesign(numStr) {
   const o = (FL.design.очередь || []).find((x) => x.номер === numStr);
   if (!o) return;
   FL.num = numStr;
-  FL.rows = (o.карта || []).map((r) => ({ ...r }));
+  FL.grid = flGridFromCard(o.карта);
   render();
 }
 
 async function flSaveDesign(done) {
-  const body = { номер: FL.num, готово: done, комментарий: ($('#fl-note') || {}).value || '', позиции: FL.rows };
+  const rows = flGridToRows();
+  const bad = rows.find((r) => !String(r.модель).trim() || !String(r.цвет).trim());
+  if (bad) return toast('У строки сетки не заполнена модель или цвет', 'err');
+  const body = { номер: FL.num, готово: done, комментарий: ($('#fl-note') || {}).value || '', позиции: rows };
   if (done && !confirm('Утвердить карту и передать заказ снабженцу? После этого карту не поменять.')) return;
   try {
     const res = await api(`${API}/design`, { method: 'POST', body: JSON.stringify(body) });
@@ -206,12 +292,112 @@ async function flSaveDesign(done) {
 // ------------------------------------------------------------- снабжение
 function supplyHtml() {
   const t = FL.supplyTab;
-  const sub = [['orders', `Заказы ${nf((FL.supply.очередь || []).length)}`], ['rolls', 'Рулоны']];
+  const buyN = (FL.supply.докупить || []).length;
+  const sub = [['orders', `Заказы ${nf((FL.supply.очередь || []).length)}`],
+    ['buy', `Что докупить${buyN ? ' ' + nf(buyN) : ''}`], ['rolls', 'Рулоны']];
   return `<div class="cx-hero compact"><div><h1>Снабжение</h1>
       <div class="cx-sub">Сколько сырья нужно на заказ по справочнику товара и сколько его на складе. Когда сырьё готово — заказ уходит технологу</div></div>
       <div class="cx-hero-actions"><button class="btn" data-act="refresh">Обновить</button></div></div>
     <div class="cx-tabs">${sub.map(([id, l]) => `<button class="cx-tab ${t === id ? 'on' : ''}" data-act="fl-sub" data-tab="${id}">${l}</button>`).join('')}</div>
-    ${t === 'rolls' ? rollsHtml() : supplyOrdersHtml()}`;
+    ${t === 'rolls' ? rollsHtml() : (t === 'buy' ? buyHtml() : supplyOrdersHtml())}`;
+}
+
+// ------------------------------------------------- что докупить (все заказы снабжения разом)
+function flBuyOrders(r) {
+  return r.заказы.map((z) => `№${esc(z.номер)}: ${flStockQty(z.нужно, r.ед)}`).join('<br>');
+}
+
+function buyHtml() {
+  const list = FL.supply.докупить || [];
+  if (!list.length) {
+    return `<div class="cx-card"><div class="cx-empty"><b>Докупать ничего не нужно</b>Сырья на складе хватает на все заказы у снабженца, и ни одна позиция не ниже минимального остатка</div></div>`;
+  }
+  const rows = list.map((r) => `<tr>
+      <td><b>${esc(r.материал)}</b>${r.на_складе ? '' : '<div class="cx-hint">нет на складе сырья</div>'}</td>
+      <td>${r.цвет ? esc(r.цвет) : '<span class="cx-hint">любой</span>'}</td>
+      <td class="num">${r.нужно ? flStockQty(r.нужно, r.ед) : '—'}${r.заказы.length ? `<div class="cx-hint">${flBuyOrders(r)}</div>` : ''}
+        ${r.единицы_не_сходятся.length ? `<div class="cx-neg">не сложено — другие единицы: ${r.единицы_не_сходятся.map(esc).join('; ')}</div>` : ''}</td>
+      <td class="num">${r.на_складе ? (r.свободно < 0 ? `<span class="cx-neg">${flStockQty(r.свободно, r.ед)}</span><div class="cx-hint">партиям в крое не хватает</div>` : flStockQty(r.свободно, r.ед)) : '—'}</td>
+      <td class="num">${r.мин ? flStockQty(r.мин, r.ед) : '—'}</td>
+      <td class="num">${r.заказано ? flStockQty(r.заказано, r.ед) : '—'}</td>
+      <td class="num"><b class="${r.не_хватает > 0 ? 'cx-neg' : ''}">${flQty(r.докупить, r.ед)}</b>
+        ${!r.не_хватает && r.мин ? '<div class="cx-hint">до мин. остатка</div>' : ''}</td>
+    </tr>`).join('');
+  const short = list.filter((r) => r.не_хватает > 0).length;
+  return `<div class="cx-card"><div class="cx-card-h"><h3>Что докупить</h3>
+      <span class="cx-hint">${short ? `не хватает заказам: <b>${nf(short)}</b> поз.` : 'заказам хватает'} · всего в списке ${nf(list.length)}</span></div>
+    <div class="cx-card-b">
+      <div class="cx-scroll"><table class="cx-table">
+        <thead><tr><th>Материал</th><th>Цвет</th><th class="num">Нужно заказам</th><th class="num">Свободно на складе</th>
+          <th class="num">Мин. остаток</th><th class="num">Уже заказано</th><th class="num">Докупить</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="cx-btn-row" style="margin-top:14px">
+        <button class="btn primary" data-act="fl-buy-print">Печать</button>
+        <button class="btn" data-act="fl-buy-csv">Скачать для Excel</button>
+      </div>
+      <div class="cx-hint" style="margin-top:10px">Считается по всем заказам во вкладке «Заказы» сразу: докупить = нужно заказам + мин. остаток − свободно на складе − уже заказано.
+        «Свободно» — остаток минус то, что ещё нужно партиям в крое. «Уже заказано» — строки заказа со статусом «заказано» и количеством в колонке «Есть / заказано».</div>
+    </div></div>`;
+}
+
+// одна строка для печати и Excel: число в единицах склада (граммы — подсказкой не нужны)
+function flBuyPlain(r) {
+  return {
+    материал: r.материал, цвет: r.цвет || 'любой', ед: r.ед,
+    нужно: r.нужно, заказы: r.заказы.map((z) => `№${z.номер}: ${String(z.нужно).replace('.', ',')} ${r.ед}`).join('; '),
+    свободно: r.на_складе ? r.свободно : '', мин: r.мин || '', заказано: r.заказано || '', докупить: r.докупить,
+  };
+}
+
+function flBuyPrint() {
+  const list = (FL.supply.докупить || []).map(flBuyPlain);
+  const today = new Date().toLocaleDateString('ru-RU');
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+  document.body.appendChild(frame);
+  const doc = frame.contentDocument;
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>Что докупить · ${today}</title><style>
+    body { font: 12px/1.4 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; margin: 14mm; color: #000; }
+    h1 { font-size: 18px; margin: 0 0 4px; } .sub { color: #555; margin-bottom: 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #999; padding: 5px 7px; vertical-align: top; text-align: left; }
+    th { background: #eee; font-size: 11px; } .num { text-align: right; white-space: nowrap; }
+    td.buy { font-weight: 700; font-size: 14px; } .z { color: #555; font-size: 10px; }
+  </style></head><body>
+    <h1>Что докупить</h1><div class="sub">${today} · заказы у снабженца · позиций ${list.length}</div>
+    <table><thead><tr><th>Материал</th><th>Цвет</th><th class="num">Докупить</th><th class="num">Нужно заказам</th>
+      <th class="num">Свободно</th><th class="num">Уже заказано</th><th>Отметка</th></tr></thead>
+    <tbody>${list.map((r) => `<tr><td>${esc(r.материал)}</td><td>${esc(r.цвет)}</td>
+      <td class="num buy">${nf(r.докупить)} ${esc(r.ед)}</td>
+      <td class="num">${r.нужно ? nf(r.нужно) + ' ' + esc(r.ед) : '—'}${r.заказы ? `<div class="z">${esc(r.заказы)}</div>` : ''}</td>
+      <td class="num">${r.свободно === '' ? '—' : nf(r.свободно) + ' ' + esc(r.ед)}</td>
+      <td class="num">${r.заказано ? nf(r.заказано) + ' ' + esc(r.ед) : '—'}</td><td style="width:22mm"></td></tr>`).join('')}</tbody></table>
+  </body></html>`);
+  doc.close();
+  setTimeout(() => {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    setTimeout(() => frame.parentNode && frame.parentNode.removeChild(frame), 60000);
+  }, 200);
+}
+
+// CSV для Excel: разделитель «;», десятичная запятая и BOM — русский Excel открывает без вопросов
+function flBuyCsv() {
+  const list = (FL.supply.докупить || []).map(flBuyPlain);
+  const cell = (v) => {
+    const s = typeof v === 'number' ? String(v).replace('.', ',') : String(v == null ? '' : v);
+    return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const head = ['Материал', 'Цвет', 'Ед.', 'Докупить', 'Нужно заказам', 'По заказам', 'Свободно на складе', 'Мин. остаток', 'Уже заказано'];
+  const lines = [head, ...list.map((r) => [r.материал, r.цвет, r.ед, r.докупить, r.нужно, r.заказы, r.свободно, r.мин, r.заказано])];
+  const text = '﻿' + lines.map((l) => l.map(cell).join(';')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+  a.download = `dokupit_${new Date().toISOString().slice(0, 10)}.csv`;  // латиница: кириллицу браузер может заменить на «download»
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
 }
 
 function supplyOrdersHtml() {
@@ -485,12 +671,36 @@ document.addEventListener('click', async (ev) => {
   const act = el.dataset.act;
   if (act === 'fl-design-open') return flOpenDesign(el.dataset.num);
   if (act === 'fl-supply-open') return flOpenSupply(el.dataset.num);
-  if (act === 'fl-row-add') {
-    const last = FL.rows[FL.rows.length - 1] || {};
-    FL.rows.push({ модель: last.модель || '', цвет: last.цвет || '', размер: '', заказано: 0, итог: 0, характеристики: '' });
+  if (act === 'fl-g-add') {
+    const last = FL.grid.groups[FL.grid.groups.length - 1] || {};
+    FL.grid.groups.push({ модель: last.модель || '', цвет: '', хар: '', хар_разные: false, хар_тронуты: false, cells: {} });
+    render();
+    const inp = document.querySelector(`[data-fl-g="${FL.grid.groups.length - 1}|цвет"]`);
+    if (inp) inp.focus();
+    return;
+  }
+  if (act === 'fl-g-del') {
+    const g = FL.grid.groups[Number(el.dataset.i)];
+    const n = FL.grid.sizes.reduce((s, sz) => s + flCellQty(g.cells[sz]), 0);
+    if (n && !confirm(`Убрать ${g.модель} · ${g.цвет} (${nf(n)} шт) из карты?`)) return;
+    FL.grid.groups.splice(Number(el.dataset.i), 1);
     return render();
   }
-  if (act === 'fl-row-del') { FL.rows.splice(Number(el.dataset.i), 1); return render(); }
+  if (act === 'fl-g-size-add') {
+    const v = String(($('#fl-g-size') || {}).value || '').trim();
+    if (!v) return toast('Впишите размер, например 50', 'err');
+    if (FL.grid.sizes.includes(v)) return toast(`Размер ${v} уже есть`, 'err');
+    FL.grid.sizes = flSizeSort([...FL.grid.sizes, v]);
+    return render();
+  }
+  if (act === 'fl-g-size-del') {
+    const sz = FL.grid.sizes[Number(el.dataset.i)];
+    const n = FL.grid.groups.reduce((s, g) => s + flCellQty(g.cells[sz]), 0);
+    if (n && !confirm(`Убрать размер ${sz || 'без размера'} (${nf(n)} шт) из карты?`)) return;
+    FL.grid.sizes = FL.grid.sizes.filter((x) => x !== sz);
+    FL.grid.groups.forEach((g) => { delete g.cells[sz]; });
+    return render();
+  }
   if (act === 'fl-design-save' || act === 'fl-design-done') {
     el.disabled = true; await flSaveDesign(act === 'fl-design-done'); el.disabled = false; return;
   }
@@ -498,6 +708,8 @@ document.addEventListener('click', async (ev) => {
     el.disabled = true; await flSaveSupply(act === 'fl-supply-done'); el.disabled = false; return;
   }
   if (act === 'fl-sub') { FL.supplyTab = el.dataset.tab; FL.num = ''; return render(); }
+  if (act === 'fl-buy-print') return flBuyPrint();
+  if (act === 'fl-buy-csv') return flBuyCsv();
   if (act === 'fl-bom-pick') {
     FL.bomModel = el.dataset.model;
     const got = flBomToRows((FL.supply.спецификации || {})[FL.bomModel] || []);
@@ -582,10 +794,20 @@ document.addEventListener('input', (ev) => {
     const [i, f] = t.dataset[attr].split('|');
     list[Number(i)][f] = t.value;
   };
-  if (t.dataset.flRow) {
-    pick('flRow', FL.rows);
-    const total = document.getElementById('fl-total');
-    if (total) total.textContent = nf(FL.rows.reduce((s, r) => s + num(r.итог), 0));
+  if (t.dataset.flG) {
+    const [i, f] = t.dataset.flG.split('|');
+    const g = FL.grid.groups[Number(i)];
+    if (f === 'хар') { g.хар = t.value; g.хар_тронуты = true; } else g[f] = t.value;
+  }
+  if (t.dataset.flGc) {
+    const raw = t.dataset.flGc;
+    const cut = raw.indexOf('|');
+    const g = FL.grid.groups[Number(raw.slice(0, cut))];
+    const sz = raw.slice(cut + 1);
+    const c = g.cells[sz] || (g.cells[sz] = { итог: '', заказано: 0, был: false, хар: '' });
+    c.итог = t.value;
+    t.classList.toggle('diff', c.был && t.value.trim() !== '' && Math.round(num(t.value)) !== c.заказано);
+    flGridRefresh();
   }
   if (t.dataset.flMat) pick('flMat', FL.rows);
   if (t.dataset.flSf) FL.stockForm[t.dataset.flSf] = t.value;

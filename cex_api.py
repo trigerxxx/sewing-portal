@@ -866,16 +866,71 @@ def supply_state() -> dict:
             o["расход"] = model_specs(o["карта"], bom)
             queue_.append(o)
     items = wh_items()
-    if queue_:
-        bal, held = wh_balances(), wh_reserved(bom, items)
-        for o in queue_:
-            left: dict = {}
-            for m in o["сырьё"]:
-                m["склад"] = wh_line(m, items, bal, held, left)
+    bal, held = wh_balances(), wh_reserved(bom, items)
+    for o in queue_:
+        left: dict = {}
+        for m in o["сырьё"]:
+            m["склад"] = wh_line(m, items, bal, held, left)
     names = sorted({i["материал"] for i in items.values()}, key=str.lower)
     return {"очередь": queue_, "спецификации": bom, "рулоны": list(roll_registry().values())[::-1][:300],
             "размеры": model_sizes(bom), "материалы": names,
-            "статусы": list(SUPPLY_STATUSES)}
+            "статусы": list(SUPPLY_STATUSES),
+            "докупить": purchase_list(queue_, items, bal, held)}
+
+
+def purchase_list(queue_: list[dict], items: dict, bal: dict, held: dict) -> list[dict]:
+    """«Что докупить»: сырьё всех заказов у снабженца против свободного остатка склада — одним списком.
+
+    Свободный остаток считаем ОДИН раз на позицию склада (по заказам по отдельности он засчитался бы
+    дважды). Докупить = нужно заказам + мин. остаток − свободно − уже заказано у поставщика;
+    свободно ниже нуля (партиям в крое не хватает) увеличивает закупку.
+    «Уже заказано» — строки снабжения со статусом «заказано» (колонка «есть»).
+    Позиции склада ниже мин. остатка попадают в список, даже если заказам они не нужны.
+    """
+    acc: dict[tuple, dict] = {}
+
+    def row(key, mat, color, unit, item):
+        return acc.setdefault(key, {
+            "материал": mat, "цвет": color, "ед": unit, "нужно": 0.0, "заказано": 0.0,
+            "заказы": {}, "на_складе": item is not None, "единицы_не_сходятся": [],
+            "мин": item["мин"] if item else 0.0})
+
+    for o in queue_:
+        for m in o.get("сырьё") or []:
+            it = wh_find(items, m["материал"], m["цвет"])
+            if it is None:
+                key = ("—", _s(m["материал"]).lower(), _s(m["цвет"]).lower(), _unit_key(m["ед"]))
+                r, q = row(key, m["материал"], m["цвет"], m["ед"], None), m["нужно"]
+                ordered = m.get("есть") if m.get("статус") == "заказано" else 0
+            else:
+                r = row(_wh_key(it["материал"], it["цвет"]), it["материал"], it["цвет"], it["ед"], it)
+                q = _convert(m["нужно"], m["ед"], it["ед"])
+                ordered = _convert(m.get("есть") or 0, m["ед"], it["ед"]) if m.get("статус") == "заказано" else 0
+                if q is None:  # норма в метрах, а склад в кг — сложить нельзя, показываем отдельно
+                    r["единицы_не_сходятся"].append(f'№{o["номер"]}: {m["нужно"]:g} {m["ед"]}')
+                    continue
+            r["нужно"] += q
+            r["заказано"] += ordered or 0
+            r["заказы"][o["номер"]] = r["заказы"].get(o["номер"], 0.0) + q
+
+    for k, it in items.items():  # ниже минимального остатка — тоже докупать
+        if it["мин"] and k not in acc and bal.get(k, 0.0) - held.get(k, 0.0) < it["мин"]:
+            row(k, it["материал"], it["цвет"], it["ед"], it)
+
+    out = []
+    for k, r in acc.items():
+        free = round(bal.get(k, 0.0) - held.get(k, 0.0), 4) if r["на_складе"] else 0.0
+        # free < 0 — партиям в крое уже не хватает: это тоже докупать
+        buy = r["нужно"] + r["мин"] - free - r["заказано"]
+        short = r["нужно"] - free
+        if buy <= 1e-9 and not r["единицы_не_сходятся"]:
+            continue
+        out.append({**r, "нужно": round(r["нужно"], 3), "заказано": round(r["заказано"], 3),
+                    "свободно": free, "не_хватает": round(max(short, 0.0), 3),
+                    "докупить": round(max(buy, 0.0), 3), "граммы": _grams(max(buy, 0.0), r["ед"]),
+                    "заказы": [{"номер": n, "нужно": round(v, 3)} for n, v in r["заказы"].items()]})
+    out.sort(key=lambda x: (-bool(x["не_хватает"]), x["материал"].lower(), x["цвет"].lower()))
+    return out
 
 
 def save_supply(me: dict, body: dict) -> dict:
