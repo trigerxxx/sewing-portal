@@ -2035,6 +2035,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(f"синхронизация WB: {exc}", 500)
             return
 
+        if path == "/api/wb/stickers" and method == "POST":
+            if not can(me, "wb.manage"):
+                self._err("печатать стикеры может склад, менеджер или начальник", 403)
+                return
+            body = self._body()
+            ids = body.get("ids") or []
+            if not isinstance(ids, list) or not ids:
+                self._err("не выбрано ни одного заказа")
+                return
+            try:
+                import wb_sync
+                res = wb_sync.stickers([str(i) for i in ids], str(body.get("формат") or "svg"),
+                                       str(body.get("размер") or "58x40"), str(me.get("фио", "")))
+                self._json({"ok": True, **res})
+            except ValueError as exc:
+                self._err(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                self._err(f"стикеры WB: {exc}", 500)
+            return
+
         if path == "/api/wb/status" and method == "GET":
             if not can(me, "wh.view") and not can(me, "wb.manage"):
                 self._err("нет доступа", 403)

@@ -126,6 +126,31 @@ def confirm_orders(token: str, order_ids: list[int]) -> dict:
                     payload={"orders": [{"id": int(i), "status": "confirm"} for i in order_ids]})
 
 
+STICKER_TYPES = ("svg", "png", "zplv", "zplh")
+STICKER_SIZES = ((58, 40), (40, 30))
+STICKER_BATCH = 100  # лимит WB на один запрос
+
+
+def stickers(token: str, order_ids: list[int], kind: str = "svg",
+             width: int = 58, height: int = 40) -> list[dict]:
+    """Стикеры сборочных заданий (только для заданий «на сборке»).
+
+    Возвращает [{orderId, partA, partB, barcode, file}] — file в base64.
+    """
+    if kind not in STICKER_TYPES:
+        raise WbError(f"формат стикера: {', '.join(STICKER_TYPES)}", 400)
+    if (width, height) not in STICKER_SIZES:
+        raise WbError("размер стикера: 58x40 или 40x30", 400)
+    ids = [int(i) for i in order_ids]
+    out: list[dict] = []
+    for start in range(0, len(ids), STICKER_BATCH):
+        chunk = ids[start:start + STICKER_BATCH]
+        data = _request(f"/api/v3/orders/stickers?type={kind}&width={width}&height={height}",
+                        token, method="POST", payload={"orders": chunk})
+        out.extend(data.get("stickers") or [])
+    return out
+
+
 def ping(token: str) -> dict:
     """Проверка токена: пробуем получить новые заказы."""
     return {"orders": len(new_orders(token))}

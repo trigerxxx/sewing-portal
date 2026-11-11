@@ -476,6 +476,79 @@ def confirm(order_ids: list[str], actor: str = "") -> dict:
     return {"подтверждено": done, "ошибки": errors}
 
 
+STICKER_MIME = {"svg": "image/svg+xml", "png": "image/png", "zplv": "text/plain", "zplh": "text/plain"}
+
+
+def stickers(order_ids: list[str], kind: str = "svg", size: str = "58x40",
+             actor: str = "") -> dict:
+    """Стикеры WB для наших заказов: по одному на каждое сборочное задание.
+
+    Стикер WB выдаёт только после подтверждения сборки, поэтому новые и отменённые пропускаем.
+    """
+    if kind not in wb_api.STICKER_TYPES:
+        raise ValueError("формат стикера: " + ", ".join(wb_api.STICKER_TYPES))
+    try:
+        width, height = (int(x) for x in str(size).lower().split("x"))
+    except ValueError:
+        raise ValueError("размер стикера: 58x40 или 40x30") from None
+    if (width, height) not in wb_api.STICKER_SIZES:
+        raise ValueError("размер стикера: 58x40 или 40x30")
+    con = sqldb.connect()
+    by_cab: dict[str, list[tuple[str, str, int]]] = {}
+    errors: list[dict] = []
+    try:
+        for oid in order_ids:
+            row = con.execute("SELECT * FROM orders WHERE id=? AND type='fbs'", (oid,)).fetchone()
+            if not row:
+                errors.append({"id": oid, "ошибка": "заказ не найден"})
+                continue
+            if row["status"] in (STATUS_NEW, STATUS_PICKING, STATUS_CANCELLED):
+                errors.append({"id": oid, "номер": row["external_id"],
+                               "ошибка": f"статус «{LABELS.get(row['status'], row['status'])}» — "
+                                         "стикер будет после подтверждения сборки"})
+                continue
+            items = [r["external_id"] for r in con.execute(
+                "SELECT external_id FROM order_items WHERE order_id=? AND external_id IS NOT NULL", (oid,))]
+            for ext in items or [row["external_id"]]:
+                try:
+                    by_cab.setdefault(row["cabinet_id"], []).append((oid, row["external_id"], int(ext)))
+                except (TypeError, ValueError):
+                    errors.append({"id": oid, "ошибка": f"некорректный номер задания {ext!r}"})
+    finally:
+        con.close()
+
+    out: list[dict] = []
+    for cab, wanted in by_cab.items():
+        token = cabinets_store.token(cab)
+        if not token:
+            errors.extend({"id": oid, "номер": num, "ошибка": f"у кабинета {cab} нет токена"}
+                          for oid, num, _ in wanted)
+            continue
+        try:
+            got = wb_api.stickers(token, [t for _, _, t in wanted], kind, width, height)
+        except wb_api.WbError as exc:
+            errors.extend({"id": oid, "номер": num, "ошибка": str(exc)} for oid, num, _ in wanted)
+            continue
+        by_task = {int(s.get("orderId") or 0): s for s in got}
+        for oid, num, task in wanted:
+            st = by_task.get(task)
+            if not st:
+                errors.append({"id": oid, "номер": num, "ошибка": f"WB не вернул стикер задания {task}"})
+                continue
+            out.append({"id": oid, "номер": num, "задание": task, "кабинет": cab,
+                        "partA": st.get("partA"), "partB": st.get("partB"),
+                        "barcode": st.get("barcode"), "file": st.get("file") or "",
+                        "mime": STICKER_MIME.get(kind, "application/octet-stream")})
+    if actor:
+        con = sqldb.connect()
+        try:
+            sqldb.audit(con, actor, "wb_stickers", "orders", "",
+                        {"заказов": len(order_ids), "стикеров": len(out), "ошибок": len(errors)})
+        finally:
+            con.close()
+    return {"стикеры": out, "ошибки": errors, "формат": kind, "размер": f"{width}x{height}"}
+
+
 def list_orders(status: str | None = None, cabinet_id: str | None = None,
                 limit: int = 200) -> list[dict]:
     con = sqldb.connect()

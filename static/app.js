@@ -1971,13 +1971,67 @@ function fbsAutoHtml(auto) {
   return `<div class="hint">${parts.join(' · ')}${err}</div>`;
 }
 
+// стикер WB выдаёт только после подтверждения сборки
+function fbsHasSticker(o) {
+  return !['new', 'picking', 'cancelled'].includes(o['status']);
+}
+
+function fbsPrintStickers(list, size) {
+  const [w, h] = size.split('x');
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+  document.body.appendChild(frame);
+  const doc = frame.contentDocument;
+  doc.open();
+  doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>Стикеры WB</title><style>
+    @page { size: ${w}mm ${h}mm; margin: 0; }
+    html, body { margin: 0; padding: 0; }
+    .st { width: ${w}mm; height: ${h}mm; page-break-after: always; break-after: page; overflow: hidden; }
+    .st:last-child { page-break-after: auto; break-after: auto; }
+    .st img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  </style></head><body>${list.map((s) =>
+    `<div class="st"><img src="data:${s['mime']};base64,${s['file']}" alt="${esc(String(s['задание']))}"></div>`).join('')}</body></html>`);
+  doc.close();
+  const imgs = Array.from(doc.images);
+  Promise.all(imgs.map((im) => im.complete ? 0 : new Promise((r) => { im.onload = im.onerror = r; })))
+    .then(() => {
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+      setTimeout(() => frame.parentNode && frame.parentNode.removeChild(frame), 60000);
+    });
+}
+
+function fbsDownloadZpl(list) {
+  const text = list.map((s) => {
+    try { return new TextDecoder().decode(Uint8Array.from(atob(s['file']), (c) => c.charCodeAt(0))); }
+    catch (e) { return ''; }
+  }).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = `wb_stickers_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.zpl`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+}
+
 function fbsListHtml(rows, canManage) {
   if (!rows.length) {
     return `<div class="card"><div class="empty">
       Новых заказов нет.<br><span class="muted">Сервер проверяет кабинет сам; чтобы не ждать — «Обновить из WB».</span>
     </div></div>`;
   }
-  return `<div class="card"><div class="card-b tight tablescroll">
+  const withSticker = rows.filter(fbsHasSticker).length;
+  const inWork = rows.filter((o) => o['status'] === 'processing').length;
+  const toolbar = canManage && withSticker ? `<div class="card"><div class="card-b" style="padding-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <b>Стикеры WB</b>
+      <div style="flex:0 1 160px;min-width:140px"><select class="input" id="fbs-st-size">
+        <option value="58x40">58×40 мм</option><option value="40x30">40×30 мм</option></select></div>
+      <div style="flex:0 1 260px;min-width:200px"><select class="input" id="fbs-st-kind">
+        <option value="svg">Печать (любой принтер)</option><option value="zplv">ZPL для термопринтера</option></select></div>
+      <button class="btn primary" data-fbs="stickers">Печать стикеров</button>
+      <span class="muted">${inWork ? `без отметок — все «В обработке» (${inWork})` : 'отметьте заказы для повторной печати'}</span>
+    </div></div>` : '';
+  return `${toolbar}<div class="card"><div class="card-b tight tablescroll">
     <table class="resp">
       <thead><tr>
         ${canManage ? '<th></th>' : ''}
@@ -1985,8 +2039,8 @@ function fbsListHtml(rows, canManage) {
         <th class="num">Цена</th><th>Дата</th><th>Статус</th>
       </tr></thead>
       <tbody>${rows.map((o) => `<tr>
-        ${canManage ? `<td><input type="checkbox" class="fbs-check" value="${esc(o['id'])}"
-            ${o['status'] === 'new' ? '' : 'disabled'}></td>` : ''}
+        ${canManage ? `<td><input type="checkbox" class="fbs-check" value="${esc(o['id'])}" data-status="${esc(o['status'])}"
+            ${fbsHasSticker(o) ? '' : 'disabled title="Стикер будет после подтверждения сборки"'}></td>` : ''}
         <td data-l="Заказ"><b>${esc(o['external_id'])}</b>${o['items'] > 1 ? ' · ' + o['items'] + ' поз.' : ''}</td>
         <td data-l="Кабинет"><span class="pill grey">${esc(o['cabinet_id'])}</span></td>
         <td data-l="Товар">${(o['items_detail'] || []).map((i) =>
@@ -3090,6 +3144,29 @@ function bindFbs() {
       toast('WB: ' + parts.join(', ') + (errs ? ' · ' + errs : ''), errs ? 'warn' : 'ok');
       await go('fbs');
     } catch (e) { toast(e.message, 'err'); b.disabled = false; }
+  }));
+  $$('[data-fbs="stickers"]', page).forEach((b) => b.addEventListener('click', async () => {
+    // без отметок печатаем только «В обработке»; отправленные — лишь по явной отметке (повторная печать)
+    const boxes = $$('.fbs-check').filter((c) => !c.disabled);
+    let ids = boxes.filter((c) => c.checked).map((c) => c.value);
+    if (!ids.length) ids = boxes.filter((c) => c.dataset.status === 'processing').map((c) => c.value);
+    if (!ids.length) return toast('Отметьте заказы, для которых нужен стикер', 'err');
+    const size = $('#fbs-st-size').value;
+    const kind = $('#fbs-st-kind').value;
+    b.disabled = true;
+    try {
+      const r = await api('/api/wb/stickers', { method: 'POST', body: JSON.stringify({ ids, формат: kind, размер: size }) });
+      const list = r['стикеры'] || [];
+      const errs = r['ошибки'] || [];
+      if (list.length) {
+        if (kind === 'svg') fbsPrintStickers(list, size); else fbsDownloadZpl(list);
+      }
+      const msg = `Стикеров: ${list.length}` + (errs.length
+        ? ` · не получено ${errs.length}: ${errs.slice(0, 2).map((e) => (e['номер'] || e['id']) + ' — ' + e['ошибка']).join('; ')}`
+        : '');
+      toast(msg, errs.length ? (list.length ? 'warn' : 'err') : 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    b.disabled = false;
   }));
   $$('[data-fbs="confirm"]', page).forEach((b) => b.addEventListener('click', async () => {
     const ids = $$('.fbs-check').filter((c) => c.checked).map((c) => c.value);
