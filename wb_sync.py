@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,9 @@ STATUS_PICKED = "picked"
 STATUS_SHIPPED = "shipped"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+
+# ручное «Обновить из WB» и автообновление не должны идти одновременно
+SYNC_LOCK = threading.Lock()
 
 LABELS = {
     STATUS_NEW: "Новый",
@@ -170,7 +174,7 @@ def _rematch(con, cabinet_id: str) -> int:
             fixed += 1
     return fixed
 
-
+    from datetime import datetime, timedelta, timezone
 def _older_than(stamp, hours: int = 24) -> bool:
     from datetime import datetime, timedelta
     if not stamp:
@@ -182,13 +186,13 @@ def _older_than(stamp, hours: int = 24) -> bool:
             dt = datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S")
         except ValueError:
             return False
-    return datetime.utcnow() - dt > timedelta(hours=hours)
+    return datetime.now(timezone.utc).replace(tzinfo=None) - dt > timedelta(hours=hours)
 
 
 def _stats_map(token: str) -> dict[str, dict]:
     """srid (orderUid) → запись статистики: отмена и дата изменения."""
-    from datetime import datetime, timedelta
-    date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    from datetime import datetime, timedelta, timezone
+    date_from = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
     try:
         rows = wb_api.statistics_orders(token, date_from)
     except Exception:
@@ -255,6 +259,11 @@ def reconcile(con, cabinet_id: str, fresh_ids: set[str], token: str,
 
 def sync(cabinet_id: str | None = None, actor: str = "wb-api") -> dict:
     """Опрашивает WB по всем активным кабинетам с токеном."""
+    with SYNC_LOCK:
+        return _sync(cabinet_id, actor)
+
+
+def _sync(cabinet_id: str | None, actor: str) -> dict:
     con = sqldb.connect()
     result = {"кабинеты": [], "создано": 0, "обновлено": 0, "ошибки": []}
     try:

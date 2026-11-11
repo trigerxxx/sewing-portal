@@ -2035,6 +2035,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(f"синхронизация WB: {exc}", 500)
             return
 
+        if path == "/api/wb/status" and method == "GET":
+            if not can(me, "wh.view") and not can(me, "wb.manage"):
+                self._err("нет доступа", 403)
+                return
+            import cabinets_store
+            import wb_autosync
+            self._json({"ok": True, "автообновление": wb_autosync.status(),
+                        "кабинеты": [{k: c[k] for k in ("id", "name", "active", "token_set", "last_sync_at")}
+                                     for c in cabinets_store.cabinets()]})
+            return
+
         if path == "/api/wb/confirm" and method == "POST":
             if not can(me, "wb.manage"):
                 self._err("подтверждать может склад, менеджер или начальник", 403)
@@ -2351,6 +2362,13 @@ def main():
             print("склад не прогрет:", exc)
 
     threading.Thread(target=_boot_sync, daemon=True).start()
+    try:
+        import wb_autosync
+        wb_autosync.start()
+        minutes = wb_autosync.interval_minutes()
+        print(f"заказы WB: автообновление каждые {minutes} мин" if minutes else "заказы WB: автообновление выключено")
+    except Exception as exc:  # noqa: BLE001
+        print("автообновление WB не запущено:", exc)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Проект V2.1 · http://{args.host}:{args.port}")

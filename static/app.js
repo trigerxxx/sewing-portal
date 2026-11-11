@@ -1929,8 +1929,12 @@ PAGES.orders = async () => {
 
 PAGES.fbs = async () => {
   const status = FBSPAGE.status || '';
-  const res = await api('/api/wb/orders' + (status ? '?статус=' + encodeURIComponent(status) : ''));
+  const [res, wbst] = await Promise.all([
+    api('/api/wb/orders' + (status ? '?статус=' + encodeURIComponent(status) : '')),
+    api('/api/wb/status').catch(() => null),
+  ]);
   const rows = res.data || [];
+  const auto = (wbst && wbst['автообновление']) || null;
   const counts = res['счётчики'] || { всего: 0, по_статусам: {} };
   const st = counts['по_статусам'] || {};
   const statuses = [['', 'Все'], ['new', 'Новые'], ['processing', 'В обработке'],
@@ -1942,7 +1946,8 @@ PAGES.fbs = async () => {
     <div class="hero">
       <div><h1>Заказы Wildberries</h1>
         <div class="sub">FBS · ${nf(counts['всего'])} заказов · новые ${nf(st['new'] || 0)}</div>
-        <div class="hint">Заказы берутся из раздела «Новые» кабинета WB, сопоставление — по артикулу продавца</div></div>
+        <div class="hint">Заказы берутся из раздела «Новые» кабинета WB, сопоставление — по артикулу продавца</div>
+        ${fbsAutoHtml(auto)}</div>
       <div class="actions">
         ${canManage ? '<button class="btn primary" data-fbs="sync">Обновить из WB</button>' : ''}
       </div>
@@ -1955,10 +1960,21 @@ PAGES.fbs = async () => {
     <div id="fbs-list">${fbsListHtml(rows, canManage)}</div>`;
 };
 
+function fbsAutoHtml(auto) {
+  if (!auto) return '';
+  if (!auto['включено']) return '<div class="hint">Автообновление выключено — только кнопкой</div>';
+  const hhmm = (t) => (t || '').slice(11, 16);
+  const parts = [`Автообновление каждые ${auto['минут']} мин`];
+  if (auto['последний_запуск']) parts.push('последнее в ' + hhmm(auto['последний_запуск']));
+  if (auto['следующий_запуск']) parts.push('следующее в ' + hhmm(auto['следующий_запуск']));
+  const err = auto['ошибка'] ? ` <span class="pill orange">${esc(auto['ошибка'])}</span>` : '';
+  return `<div class="hint">${parts.join(' · ')}${err}</div>`;
+}
+
 function fbsListHtml(rows, canManage) {
   if (!rows.length) {
     return `<div class="card"><div class="empty">
-      Новых заказов нет.<br><span class="muted">Нажмите «Обновить из WB», чтобы запросить их из кабинета.</span>
+      Новых заказов нет.<br><span class="muted">Сервер проверяет кабинет сам; чтобы не ждать — «Обновить из WB».</span>
     </div></div>`;
   }
   return `<div class="card"><div class="card-b tight tablescroll">

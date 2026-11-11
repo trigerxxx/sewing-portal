@@ -1,7 +1,7 @@
 {
  "backend": "excel",
  "shadow": false,
- "note": "backend: excel | sql. shadow: true — зеркалить операции склада в SQL. Включать только осознанно.",
+ "note": "backend: excel | sql. shadow: true — зеркалить операции склада в SQL. Включать только осознанно. wb_autosync_minutes: как часто сервер сам забирает новые заказы WB (0 — выключено, минимум 2).",
  "visible": [
   "wh",
   "shop",
@@ -9,5 +9,6 @@
   "cex"
  ],
  "client_visible": [],
- "excel_flush_minutes": 3
+ "excel_flush_minutes": 3,
+ "wb_autosync_minutes": 5
 }
